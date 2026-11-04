@@ -1,0 +1,137 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ---- helpers -------------------------------------------------------
+    // CHANGE THIS to the same email as ADMIN_EMAIL in firebase-config.js (lower-case).
+    function bootstrapAdminEmail() { return 'your-admin-email@example.com'; }
+
+    function verified() {
+      return request.auth != null && request.auth.token.email_verified == true;
+    }
+    function profile() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+    function hasProfile() {
+      return verified() && exists(/databases/$(database)/documents/users/$(request.auth.uid));
+    }
+    function role() { return hasProfile() ? profile().role : 'none'; }
+    function isAdmin()  { return role() == 'admin'; }
+    function canEdit()  { return role() in ['admin', 'editor']; }
+    function canRead()  { return role() in ['admin', 'editor', 'viewer']; }
+
+    // ---- permission matrix (Admin > Access control) -----------------------
+    // settings/permissions holds { viewer: { leads_view: true, ... }, editor: { ... } }.
+    // Before an admin saves it, these defaults apply.
+    function permsPath() { return /databases/$(database)/documents/settings/permissions; }
+    function can(p) {
+      return isAdmin() || (role() in ['viewer', 'editor'] && (
+        exists(permsPath())
+          ? get(permsPath()).data.get(role(), {}).get(p, false) == true
+          : (p in ['leads_view', 'actions_view'] || role() == 'editor')
+      ));
+    }
+    // Sector scoping: a user with a non-empty `sectors` list only sees / writes leads in those sectors.
+    function sectorOk(sector) {
+      return isAdmin() || !('sectors' in profile()) || profile().sectors.size() == 0 || sector in profile().sectors;
+    }
+
+    function restricted() { return 'sectors' in profile() && profile().sectors.size() > 0; }
+    // Audit trail: admins always; viewers/editors only if Admin > Permissions allows it (editors by default).
+    // People limited to certain sectors can read only lead entries whose `sector` is one of theirs.
+    function auditRoleOk() {
+      return role() in ['viewer', 'editor'] && (
+        exists(permsPath())
+          ? get(permsPath()).data.get(role(), {}).get('audit_view', role() == 'editor') == true
+          : role() == 'editor'
+      );
+    }
+    function canAudit() { return isAdmin() || (auditRoleOk() && !restricted()); }
+    function canAuditSector(sector) { return auditRoleOk() && restricted() && sector != '' && sector in profile().sectors; }
+
+    // ---- users ---------------------------------------------------------
+    match /users/{uid} {
+      allow read: if verified() && (request.auth.uid == uid || isAdmin());
+
+      // A person can only create their own profile, as 'pending' (no access until approved).
+      // The bootstrap admin email may create itself as 'admin'.
+      allow create: if verified() && request.auth.uid == uid
+        && request.resource.data.keys().hasOnly(['email', 'name', 'role', 'createdAt', 'sectors'])
+        && request.resource.data.email == request.auth.token.email
+        && (
+          (request.resource.data.role == 'pending' && !('sectors' in request.resource.data))
+          // pre-approved by an admin via Admin > Users > Add user
+          || (exists(/databases/$(database)/documents/invites/$(request.auth.token.email.lower()))
+              && request.resource.data.role == get(/databases/$(database)/documents/invites/$(request.auth.token.email.lower())).data.role
+              && request.resource.data.get('sectors', []) == get(/databases/$(database)/documents/invites/$(request.auth.token.email.lower())).data.get('sectors', []))
+          || (request.resource.data.role == 'admin'
+              && request.auth.token.email.lower() == bootstrapAdminEmail()
+              && !('sectors' in request.resource.data))
+        );
+
+      // Admins can change anything. A person may only stamp their own `lastSeen` (set to the server time when they open the app).
+      allow update: if isAdmin() || (verified() && request.auth.uid == uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lastSeen'])
+        && request.resource.data.lastSeen == request.time);
+      allow delete: if isAdmin();
+    }
+
+    // ---- invites (pre-approved emails, created by admins) ----------------
+    match /invites/{email} {
+      allow read: if verified() && (isAdmin() || request.auth.token.email.lower() == email);
+      allow create, update: if isAdmin();
+      allow delete: if isAdmin() || (verified() && request.auth.token.email.lower() == email);
+    }
+
+    // ---- shared settings (dropdown lists) -------------------------------
+    match /settings/{id} {
+      allow read: if canRead();
+      allow write: if isAdmin();
+    }
+
+    // ---- leads & action items --------------------------------------------
+    // Who can do what is set in the app: Admin > Permissions by role.
+    match /leads/{id} {
+      allow read: if can('leads_view') && sectorOk(resource.data.get('sector', ''));
+      allow create: if can('leads_create') && sectorOk(request.resource.data.get('sector', ''))
+        && request.resource.data.company is string
+        && request.resource.data.company.size() > 0;
+      allow update: if can('leads_edit') && sectorOk(resource.data.get('sector', '')) && sectorOk(request.resource.data.get('sector', ''))
+        && request.resource.data.company is string
+        && request.resource.data.company.size() > 0;
+      allow delete: if can('leads_delete') && sectorOk(resource.data.get('sector', ''));
+    }
+
+    match /actions/{id} {
+      allow read: if can('actions_view');
+      allow create: if can('actions_create')
+        && request.resource.data.title is string
+        && request.resource.data.title.size() > 0;
+      allow update: if can('actions_edit')
+        && request.resource.data.title is string
+        && request.resource.data.title.size() > 0;
+      allow delete: if can('actions_delete');
+    }
+
+    // ---- audit trail (append-only, admins can purge) -----------------------------------------
+    // Written by the app in the same batch as each change. Entries can't be edited (apart from an admin filling in a missing sector); only admins can delete. Entries must carry the
+    // writer's own email and the server's time. Viewers may only record that they exported data or signed in.
+    match /audit/{id} {
+      allow read: if canAudit() || canAuditSector(resource.data.get('sector', ''));
+      allow create: if (canEdit() || (canRead() && (request.resource.data.action == 'export'
+          || (request.resource.data.action == 'login' && request.resource.data.entityId == request.auth.uid))))
+        && request.resource.data.keys().hasOnly(['at', 'by', 'byName', 'entity', 'entityId', 'label', 'action', 'changes', 'note', 'sector'])
+        && request.resource.data.get('sector', '') is string
+        && request.resource.data.by == request.auth.token.email
+        && request.resource.data.at == request.time
+        && request.resource.data.changes is list
+        && request.resource.data.changes.size() <= 40;
+      // The only edit allowed: an admin adding a missing `sector` to an older entry (Admin > Purge audit trail > Tag older entries).
+      allow update: if isAdmin() && !('sector' in resource.data)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['sector'])
+        && request.resource.data.sector is string;
+      // Only admins can purge entries (Admin > Purge audit trail).
+      allow delete: if isAdmin();
+    }
+  }
+}
