@@ -1,1 +1,45 @@
+name: Lead alert emails
+
+on:
+  schedule:
+    # 21:00 UTC Sunday to Thursday = 8:00 am Monday to Friday in Sydney during daylight saving (7:00 am otherwise).
+    # GitHub may start scheduled jobs a few minutes late.
+    - cron: '0 21 * * 0-4'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (check the numbers only, send nothing)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install
+        working-directory: notify
+        run: npm ci
+      - name: Send alert emails
+        working-directory: notify
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          MAIL_FROM: ${{ secrets.MAIL_FROM }}
+          APP_URL: ${{ secrets.APP_URL }}
+          TZ_NAME: Australia/Sydney
+          # A hand-started run ignores the "weekdays only" setting so you can test on any day.
+          FORCE: ${{ github.event_name == 'workflow_dispatch' && '1' || '' }}
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then node notify.mjs --dry --counts-only; else node notify.mjs; fi
 
