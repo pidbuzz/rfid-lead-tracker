@@ -1,4 +1,5 @@
 import { firebaseConfig, ADMIN_EMAIL } from './firebase-config.js';
+import { mergeAlerts, flagLead, todayIn, followText, staleText, urgency, ALWAYS_SKIP } from './alerts-core.js';
 
 /* =====================================================================
    Constants
@@ -88,7 +89,7 @@ const fmtDT = (ms) => { const d = new Date(ms); return !ms || isNaN(d) ? '' : d.
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const today = () => new Date().toISOString().slice(0, 10);
+const today = () => todayIn(); // the device's own calendar date (not UTC, which is a day behind in Australia in the morning)
 const fmtDate = (iso) => {
   if (!iso) return '';
   const d = new Date(iso.length === 10 ? iso + 'T00:00:00' : iso);
@@ -306,11 +307,12 @@ const db = getFirestore(fbApp);
    State
    ===================================================================== */
 const S = {
+  alerts: mergeAlerts(), notify: null, alertsMine: true, notifyUnsub: null,
   user: null, profile: null, leads: [], actions: [], users: [], invites: [], invitesUnsub: null, perms: mergePerms(), permsLoaded: false, permDraft: null, secDraft: null, sig: '', rowUnsubs: [], leadParts: {}, lists: structuredClone(DEFAULT_LISTS),
   route: 'dashboard', openLead: null, unsubs: [], dataUnsubs: [], usersUnsub: null, listening: false, pendingName: '',
   filters: { q: '', stage: '', sector: '', country: '', manager: '', platform: '' },
   sort: { key: 'date', dir: 'desc' }, actFilter: 'active', actQ: '', pipeQ: '', hideEmpty: false, editList: null, draft: [],
-  audit: [], auditUnsubs: [], auditParts: {}, auditLimit: 200, auditLoading: true, auditMore: false, auf: { q: '', entity: '', by: '', action: '', from: '', to: '' }, apg: { size: 25, page: 1, sig: '' }, pgr: {}, auExp: new Set(), flash: null,
+  audit: [], auditUnsubs: [], auditParts: {}, auditLimit: 200, auditLoading: true, auditMore: false, auf: { q: '', entity: '', by: '', action: '', from: '', to: '' }, apg: { size: 25, page: 1, sig: '' }, pgr: {}, auExp: new Set(), actExp: new Set(), flash: null,
   pg: { rows: [], loaded: false, loading: false, busy: false, limit: 200, more: false, sel: new Set(), from: '', to: '' },
   colf: { leads: {}, actions: {}, audit: {} }, fin: null, dash: { tab: 'overview', mode: 'w', cur: 'base', sel: null, who: null, ov: { f: {}, by: 'sector', focus: 'attention', metric: 'n' }, mv: { stage: '', focus: 'attention', metric: 'n', act: 'open', q: '', all: '' } }, colOpen: null, cpAll: [], cpList: [],
 };
@@ -498,6 +500,7 @@ function cleanup() {
   S.unsubs.forEach((u) => u()); S.unsubs = [];
   S.usersUnsub?.(); S.usersUnsub = null;
   S.invitesUnsub?.(); S.invitesUnsub = null; S.invites = [];
+  S.notifyUnsub?.(); S.notifyUnsub = null; S.notify = null;
   S.listening = false; S.profile = null; S.leads = []; S.actions = []; S.users = []; S.openLead = null; S.colorBy = null;
 }
 
@@ -599,6 +602,9 @@ function gate() {
   if (isAdmin() && !S.invitesUnsub) {
     S.invitesUnsub = onSnapshot(collection(db, 'invites'), (s) => { S.invites = s.docs.map((d) => ({ id: d.id, ...d.data() })); if (S.route === 'admin') render(); }, () => {});
   }
+  if (isAdmin() && !S.notifyUnsub) {
+    S.notifyUnsub = onSnapshot(doc(db, 'adminconfig', 'notify'), (s) => { S.notify = s.exists() ? s.data() : null; if (S.route === 'admin') render(); }, () => {});
+  }
   if (!isAdmin() && S.usersUnsub) { S.usersUnsub(); S.usersUnsub = null; }
   if (!isAdmin() && S.invitesUnsub) { S.invitesUnsub(); S.invitesUnsub = null; S.invites = []; }
   $('#boot').hidden = true; $('#gate').hidden = true; $('#app').hidden = false;
@@ -623,6 +629,7 @@ function startData() {
   S.err = err;
   S.dataUnsubs.push(onSnapshot(doc(db, 'settings', 'lists'), (s) => { S.lists = { ...structuredClone(DEFAULT_LISTS), ...(s.exists() ? s.data() : {}) }; render(); }, err));
   S.dataUnsubs.push(onSnapshot(doc(db, 'settings', 'permissions'), (s) => { S.perms = mergePerms(s.exists() ? s.data() : {}); S.permsLoaded = true; syncData(); render(); }, err));
+  S.dataUnsubs.push(onSnapshot(doc(db, 'settings', 'alerts'), (s) => { S.alerts = mergeAlerts(s.exists() ? s.data() : {}); render(); }, err));
   S.dataUnsubs.push(onSnapshot(doc(db, 'settings', 'finance'), (s) => { S.fin = s.exists() ? s.data() : null; render(); }, err));
   syncData();
 }
@@ -650,7 +657,7 @@ function syncData() {
 /* =====================================================================
    Routing + shell
    ===================================================================== */
-const ROUTES = { dashboard: 'Dashboard', pipeline: 'Pipeline', leads: 'Leads', actions: 'Action Items', reference: 'Reference', audit: 'Audit Trail', admin: 'Admin' };
+const ROUTES = { dashboard: 'Dashboard', pipeline: 'Pipeline', leads: 'Leads', alerts: 'Alerts', actions: 'Action Items', reference: 'Reference', audit: 'Audit Trail', admin: 'Admin' };
 function parseRoute() {
   const [r, sub = ''] = location.hash.replace(/^#\/?/, '').split('?')[0].split('/');
   S.route = ROUTES[r] ? r : 'dashboard';
@@ -669,18 +676,20 @@ const NAV_ICONS = {
   reference: ic('<path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/>'),
   admin: ic('<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/>'),
   audit: ic('<path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/><path d="M12 7v5l3 2"/>'),
+  alerts: ic('<path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/>'),
   search: ic('<circle cx="11" cy="11" r="7.5"/><path d="m21 21-4.3-4.3"/>'),
   out: ic('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5"/><path d="M21 12H9"/>'),
 };
-const NAV_GROUPS = [[null, ['dashboard']], ['Sales', ['pipeline', 'leads', 'actions']], ['Resources', ['reference']], ['Configuration', ['audit', 'admin']]];
+const NAV_GROUPS = [[null, ['dashboard']], ['Sales', ['pipeline', 'leads', 'alerts', 'actions']], ['Resources', ['reference']], ['Configuration', ['audit', 'admin']]];
 
 function renderNav() {
   const open = S.leads.filter(isOpenLead).length;
   const openActs = S.actions.filter((a) => !['Closed', 'Info Only'].includes(a.status)).length;
   const counts = { leads: S.leads.length, actions: openActs };
+  const nAlerts = alertRows().length;
   const name = S.profile.name || S.user.email;
   const initials = name.split(/[\s@.]+/).filter(Boolean).slice(0, 2).map((x) => x[0].toUpperCase()).join('') || '?';
-  const link = (k) => `<a class="nav-item" href="#/${k}" ${S.route === k ? 'aria-current="page"' : ''}>${NAV_ICONS[k]}<span class="nl">${ROUTES[k]}</span>${counts[k] != null ? `<span class="count">${counts[k]}</span>` : ''}</a>`;
+  const link = (k) => `<a class="nav-item" href="#/${k}" ${S.route === k ? 'aria-current="page"' : ''}>${NAV_ICONS[k]}<span class="nl">${ROUTES[k]}</span>${counts[k] != null ? `<span class="count">${counts[k]}</span>` : ''}${k === 'alerts' && nAlerts ? `<span class="count alert-count" title="Leads needing attention">${nAlerts}</span>` : ''}</a>`;
   const groups = NAV_GROUPS.map(([label, keys]) => [label, keys.filter((k) => (k === 'admin' ? isAdmin() : k === 'audit' ? canAudit() : true))]).filter(([, keys]) => keys.length);
   $('#nav').innerHTML = `<div class="nav-top"><div class="brand-tile"><img class="brand-logo" src="paragon-id-logo-white.png" alt="Paragon ID" width="532" height="94"></div><span class="brand-app">RFID Lead Tracker</span></div>
     <form class="nav-search" id="navSearchForm" role="search">${NAV_ICONS.search}<input type="search" id="navSearch" placeholder="Search leads…" aria-label="Search leads" autocomplete="off" value="${esc(S.navQ || '')}"></form>
@@ -708,7 +717,7 @@ function render() {
   const scroll = window.scrollY;
   const focusId = document.activeElement?.id;
   const pos = document.activeElement?.selectionStart;
-  ({ dashboard: viewDashboard, pipeline: viewPipeline, leads: viewLeads, actions: viewActions, reference: viewReference, audit: viewAudit, admin: viewAdmin }[S.route])(view);
+  ({ dashboard: viewDashboard, pipeline: viewPipeline, leads: viewLeads, alerts: viewAlerts, actions: viewActions, reference: viewReference, audit: viewAudit, admin: viewAdmin }[S.route])(view);
   if (focusId) { const el = document.getElementById(focusId); if (el) { el.focus(); try { el.setSelectionRange(pos, pos); } catch {} } }
   window.scrollTo(0, scroll);
   renderColPop();
@@ -1358,14 +1367,26 @@ function viewActions(el) {
   <div class="toolbar"><input type="search" id="a-q" placeholder="Search action items…" aria-label="Search action items" value="${esc(S.actQ)}">
     <select id="a-filter" aria-label="Status filter">${filters.map(([v, l]) => `<option value="${esc(v)}" ${S.actFilter === v ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>${colActive('actions') ? '<button class="btn ghost sm" data-act="clear-colf-actions">Clear filters</button>' : ''}</div>
   ${P.html}
-  <div class="table-wrap"><table><thead><tr>${Object.entries(COLLABEL.actions).map(([k, l]) => `<th><span class="th-in"><span>${l}</span>${cfBtn('actions', k)}</span></th>`).join('')}${can('actions_edit') || can('actions_delete') ? '<th></th>' : ''}</tr></thead>
-  <tbody>${rows.map((a) => `<tr style="cursor:default"><td class="num">${esc(a.no ?? '')}</td><td><div class="prose" style="max-width:420px">${esc(a.title)}</div></td><td>${esc(a.owner || '')}</td>
+  <div class="table-wrap"><table class="act-fixed"><thead><tr>${Object.entries(COLLABEL.actions).map(([k, l]) => `<th><span class="th-in"><span>${l}</span>${cfBtn('actions', k)}</span></th>`).join('')}<th class="ax"></th>${can('actions_edit') || can('actions_delete') ? '<th></th>' : ''}</tr></thead>
+  <tbody>${rows.map((a) => `<tr class="${S.actExp.has(a.id) ? 'x-open' : ''}" style="cursor:default"><td class="num">${esc(a.no ?? '')}</td><td><div class="prose aclamp" style="max-width:420px">${esc(a.title)}</div></td><td>${esc(a.owner || '')}</td>
     <td>${can('actions_edit') ? `<select data-status="${a.id}" aria-label="Status for action ${esc(a.no)}">${S.lists.statuses.map((s) => `<option ${a.status === s ? 'selected' : ''}>${esc(s)}</option>`).join('')}</select>` : esc(a.status || '')}</td>
     <td class="num">${fmtDate(a.created)}</td><td class="num">${a.dueDate && a.dueDate < today() && !['Closed', 'Info Only'].includes(a.status) ? `<span class="tag-warn">${fmtDate(a.dueDate)}</span>` : fmtDate(a.dueDate)}</td>
-    <td><div class="prose" style="max-width:360px">${esc(a.comments || '')}</div></td>
-    ${can('actions_edit') || can('actions_delete') ? `<td><div class="row" style="flex-wrap:nowrap">${can('actions_edit') ? `<button class="btn sm" data-edit-action="${a.id}">Edit</button>` : ''}${can('actions_delete') ? `<button class="btn sm danger" data-del-action="${a.id}">Delete</button>` : ''}</div></td>` : ''}</tr>`).join('') || `<tr><td colspan="8" class="empty">No action items match.</td></tr>`}</tbody></table></div>
+    <td><div class="prose aclamp" style="max-width:360px">${esc(a.comments || '')}</div></td>
+    <td class="ax"><button class="btn ghost sm" data-xexp="${a.id}" aria-expanded="${S.actExp.has(a.id)}">${S.actExp.has(a.id) ? 'Show less' : 'Show more'}</button></td>
+    ${can('actions_edit') || can('actions_delete') ? `<td><div class="row" style="flex-wrap:nowrap">${can('actions_edit') ? `<button class="btn sm" data-edit-action="${a.id}">Edit</button>` : ''}${can('actions_delete') ? `<button class="btn sm danger" data-del-action="${a.id}">Delete</button>` : ''}</div></td>` : ''}</tr>`).join('') || `<tr><td colspan="9" class="empty">No action items match.</td></tr>`}</tbody></table></div>
   ${P.html}`;
+  requestAnimationFrame(markActionOverflow);
 }
+
+// Show the "Show more" button only on action rows whose text is actually cut off.
+function markActionOverflow() {
+  $$('.act-fixed tbody tr').forEach((tr) => {
+    const b = tr.querySelector('[data-xexp]'); if (!b) return;
+    const over = [...tr.querySelectorAll('.aclamp')].some((c) => c.scrollHeight > c.clientHeight + 1);
+    b.classList.toggle('on', over || tr.classList.contains('x-open'));
+  });
+}
+window.addEventListener('resize', () => { if (S.route === 'actions') markActionOverflow(); });
 
 function viewReference(el) {
   el.innerHTML = `${head('Reference', 'Stage definitions and the typical tender process.')}
@@ -1373,6 +1394,89 @@ function viewReference(el) {
     <ol class="steps">${TENDER_STEPS.map(([n, p]) => `<li><div><strong>${esc(n)}</strong><p class="muted">${esc(p)}</p></div></li>`).join('')}</ol></section>
   <section class="panel"><div class="panel-head"><h2>Lead stages</h2><span class="muted small">Closed stages (Lost, Completed) are excluded from open-lead totals.</span></div>
     <div class="row">${stages().map((s) => chip(s)).join('')}</div></section>`;
+}
+
+/* =====================================================================
+   Alerts: leads with no recent update, or a follow-up that is overdue / coming up.
+   The rules live in alerts-core.js (shared with the daily email job) and are set in Admin > Alerts and email.
+   ===================================================================== */
+// Flagged leads, most urgent first. Scoped to the signed-in person's own leads when they chose "My leads" and have a matching account manager name.
+function alertRows(scoped = true) {
+  if (!S.alerts.enabled) return [];
+  const t = today(), me = myName();
+  return S.leads.filter((l) => !(scoped && me && S.alertsMine && l.manager !== me))
+    .map((l) => { const f = flagLead(l, S.alerts, t); return f ? { l, f } : null; }).filter(Boolean)
+    .sort((a, b) => urgency(a.f) - urgency(b.f));
+}
+function viewAlerts(el) {
+  const a = S.alerts, me = myName(), rows = alertRows();
+  const why = (f) => [f.follow != null ? followText(f.follow) : '', f.stale != null ? staleText(f.stale) : ''].filter(Boolean);
+  const item = ({ l, f }) => `<button type="button" class="list-item" data-open="${esc(l.id)}"><span><span class="t">${esc(l.company)}</span><br><span class="meta">${esc([l.stage, l.manager || 'Unassigned'].filter(Boolean).join(' · '))}${canValue() && l.valueAmount ? ' · ' + esc(moneyFull(l.valueAmount, l.currency)) : ''}</span></span>
+    <span class="alert-why">${why(f).map((w, i) => `<span class="alert-pill${f.follow != null && i === 0 && f.follow < 0 ? ' late' : ''}">${esc(w)}</span>`).join('')}</span></button>`;
+  const fu = rows.filter((r) => r.f.follow != null), st = rows.filter((r) => r.f.follow == null);
+  const rule = [a.staleDays > 0 ? `no update for ${plural(a.staleDays, 'day')} or more` : '', a.followDays >= 0 ? (a.followDays === 0 ? 'follow-up due or overdue' : `follow-up overdue or due within ${plural(a.followDays, 'day')}`) : ''].filter(Boolean).join(', or ');
+  const scope = me ? `<div class="ov-seg" role="group" aria-label="Whose leads"><button type="button" data-act="alerts-scope" data-v="mine" aria-pressed="${S.alertsMine}">My leads (${esc(me)})</button><button type="button" data-act="alerts-scope" data-v="all" aria-pressed="${!S.alertsMine}">Everyone</button></div>` : '';
+  const panel = (title, sub, list, empty) => `<section class="panel"><div class="panel-head"><div><h2>${title}</h2><p class="muted small">${sub}</p></div><span class="count-pill">${list.length}</span></div>${list.length ? `<div class="list">${list.map(item).join('')}</div>` : `<p class="empty">${empty}</p>`}</section>`;
+  el.innerHTML = `${head('Alerts', a.enabled ? `Leads with ${rule || 'no rules set'}.` : 'Alerts are switched off.', scope)}
+    ${a.enabled ? `${panel('Follow-ups', 'Overdue first, then the next few days.', fu, 'No follow-ups are due or overdue.')}
+    ${panel('No recent update', 'Leads that have gone quiet. Post an update to clear them.', st, 'Every lead has been updated recently.')}`
+    : `<section class="panel"><p class="empty">Alerts are off.${isAdmin() ? ' Turn them on under <a href="#/admin/alerts">Admin &rsaquo; Alerts and email</a>.' : ''}</p></section>`}
+    <p class="muted small" style="margin-top:12px">Closed leads and the stages ticked as “never alert” are skipped.${isAdmin() ? ' Change the rules and email settings under <a href="#/admin/alerts">Admin &rsaquo; Alerts and email</a>.' : ''}</p>`;
+}
+
+const EMAIL_RE = /^[^\s@,;]+@[^\s@,;]+\.[^\s@,;]+$/;
+const splitEmails = (t) => [...new Set(String(t || '').split(/[\s,;]+/).map((x) => x.trim().toLowerCase()).filter(Boolean))];
+function alertsPanel() {
+  const a = S.alerts, n = S.notify || {}, mgrs = S.lists.managers || [], em = n.managerEmails || {}, skip = new Set(a.skipStages);
+  const lr = n.lastRun;
+  const lastRun = lr?.at ? `Last email run: ${esc(fmtDT(Date.parse(lr.at)))} · ${esc(lr.status || '')}${lr.emails != null ? ` · ${plural(lr.emails, 'email')} sent, ${plural(lr.flagged ?? 0, 'lead')} flagged` : ''}.` : 'The email job has not run yet.';
+  return `<section class="panel"><div class="panel-head"><div><h2>Alert rules</h2><p class="muted small">These rules drive the <a href="#/alerts">Alerts page</a>, the count in the menu, and the daily email.</p></div></div>
+    <label class="check"><input type="checkbox" id="al-on" ${a.enabled ? 'checked' : ''}> Alerts are on</label>
+    <div class="fin-grid" style="margin-top:14px">
+      <label class="field"><span>Alert when a lead has had no update for (days)</span><input type="number" min="0" step="1" id="al-stale" value="${a.staleDays}" placeholder="0 = off"></label>
+      <label class="field"><span>Alert when a follow-up is due within (days)</span><input type="number" min="0" step="1" id="al-follow" value="${a.followDays < 0 ? '' : a.followDays}" placeholder="blank = off"></label>
+    </div>
+    <p class="muted small" style="margin-top:6px">A follow-up counts as due when its date is today, past, or within the days above. Posting an update or changing the stage resets the “no update” count.</p>
+    <h3 style="margin:18px 0 6px">Never alert for leads in these stages</h3>
+    <div class="row" style="flex-wrap:wrap;gap:6px 18px">${stages().map((s) => { const forced = ALWAYS_SKIP.includes(s); return `<label class="check"><input type="checkbox" data-al-skip="${esc(s)}" ${forced || skip.has(s) ? 'checked' : ''} ${forced ? 'disabled' : ''}> ${esc(s)}</label>`; }).join('')}</div>
+    <p class="muted small" style="margin-top:6px">Lost and Completed are always skipped.</p></section>
+  <section class="panel"><div class="panel-head"><div><h2>Daily email</h2><p class="muted small">Sent by a scheduled GitHub Actions job (see the README, “Email alerts”). People listed below get one digest a day; nothing is sent when there is nothing to report.</p></div></div>
+    <label class="check"><input type="checkbox" id="al-email" ${n.emailEnabled ? 'checked' : ''}> Send the daily email</label><br>
+    <label class="check" style="margin-top:8px"><input type="checkbox" id="al-wk" ${n.weekdaysOnly !== false ? 'checked' : ''}> Weekdays only (Monday to Friday)</label>
+    <h3 style="margin:18px 0 4px">Account managers</h3><p class="muted small">Each manager gets a digest of their own leads. Leave blank to skip a manager.</p>
+    <div class="fin-grid">${mgrs.map((m) => `<label class="field"><span>${esc(m)}</span><input type="email" data-al-mgr="${esc(m)}" value="${esc(em[m] || '')}" placeholder="name@company.com"></label>`).join('') || '<p class="muted">Add account managers under Dropdown lists first.</p>'}</div>
+    <h3 style="margin:18px 0 4px">Everyone-digest recipients</h3><p class="muted small">These people get one digest covering every flagged lead, grouped by manager. Separate addresses with commas or new lines.</p>
+    <label class="field"><textarea id="al-extra" rows="3" placeholder="sales.lead@company.com">${esc((n.extraRecipients || []).join('\n'))}</textarea></label>
+    <p class="muted small" style="margin-top:10px">${lastRun}</p>
+    <div class="row" style="margin-top:14px"><button class="btn primary" data-act="save-alerts">Save alert settings</button></div></section>`;
+}
+async function saveAlerts() {
+  const a = S.alerts, n = S.notify || {}, mgrs = S.lists.managers || [];
+  const fv = $('#al-follow').value.trim();
+  const next = {
+    enabled: $('#al-on').checked,
+    staleDays: Math.max(0, Math.round(Number($('#al-stale').value) || 0)),
+    followDays: fv === '' ? -1 : Math.max(0, Math.round(Number(fv) || 0)),
+    skipStages: $$('[data-al-skip]').filter((i) => i.checked && !i.disabled).map((i) => i.dataset.alSkip),
+  };
+  const managerEmails = {};
+  for (const i of $$('[data-al-mgr]')) { const v = i.value.trim().toLowerCase(); if (!v) continue; if (!EMAIL_RE.test(v)) return toast(`“${i.value.trim()}” isn’t a valid email address.`, true); managerEmails[i.dataset.alMgr] = v; }
+  const extra = splitEmails($('#al-extra').value), bad = extra.find((x) => !EMAIL_RE.test(x));
+  if (bad) return toast(`“${bad}” isn’t a valid email address.`, true);
+  const nn = { emailEnabled: $('#al-email').checked, weekdaysOnly: $('#al-wk').checked, managerEmails, extraRecipients: extra };
+  const onoff = (v) => (v ? 'On' : 'Off');
+  const lc = [];
+  if (next.enabled !== a.enabled) lc.push({ f: 'Alerts', from: onoff(a.enabled), to: onoff(next.enabled) });
+  if (next.staleDays !== a.staleDays) lc.push({ f: 'Days without update', from: a.staleDays ? String(a.staleDays) : 'Off', to: next.staleDays ? String(next.staleDays) : 'Off' });
+  if (next.followDays !== a.followDays) lc.push({ f: 'Follow-up window (days)', from: a.followDays < 0 ? 'Off' : String(a.followDays), to: next.followDays < 0 ? 'Off' : String(next.followDays) });
+  if ([...next.skipStages].sort().join('|') !== [...a.skipStages].sort().join('|')) lc.push({ f: 'Never alert for stages', from: a.skipStages.join(', ') || '(none)', to: next.skipStages.join(', ') || '(none)' });
+  if (nn.emailEnabled !== !!n.emailEnabled) lc.push({ f: 'Daily email', from: onoff(!!n.emailEnabled), to: onoff(nn.emailEnabled) });
+  if (nn.weekdaysOnly !== (n.weekdaysOnly !== false)) lc.push({ f: 'Email weekdays only', from: onoff(n.weekdaysOnly !== false), to: onoff(nn.weekdaysOnly) });
+  if (JSON.stringify(managerEmails) !== JSON.stringify(n.managerEmails || {}) || extra.join('|') !== (n.extraRecipients || []).join('|')) lc.push({ f: 'Email recipients', from: '', to: 'changed (addresses not logged)' });
+  if (!lc.length) return toast('No changes to save.');
+  if (!await confirmBox('Save alert settings', `Save these changes?\n\n${chText(lc)}`, 'Save')) return;
+  const ok = await run(() => commit([['set', doc(db, 'settings', 'alerts'), next], ['set', doc(db, 'adminconfig', 'notify'), nn, { merge: true }]], [auditOp('list', 'alerts', 'Alert settings', 'settings', lc)]), 'Alert settings saved');
+  if (ok) render();
 }
 
 /* =====================================================================
@@ -1540,6 +1644,7 @@ const ADMIN_PAGES = {
   lists: { title: 'Dropdown lists', blurb: 'Stages, sectors, platforms, countries, account managers, currencies and action statuses.', icon: 'M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01' },
   audit: { title: 'Purge audit trail', blurb: 'Permanently delete audit entries: tick specific lines, or clear a whole date range.', icon: 'M3 6h18|M8 6V4h8v2|M19 6l-1 14H6L5 6|M10 11v6|M14 11v6' },
   finance: { title: 'Forecast settings', blurb: 'Reporting currency, exchange rates and stage probabilities for the dashboard forecast.', icon: 'M12 1v22|M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6' },
+  alerts: { title: 'Alerts and email', blurb: 'Set when a lead counts as stale or due, and who gets the daily email digest.', icon: 'M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9|M13.7 21a2 2 0 0 1-3.4 0' },
   data: { title: 'Data and backup', blurb: 'Import leads from a file or download a full backup.', icon: 'e12,5,9,3|M3 5v14a9 3 0 0 0 18 0V5|M3 12a9 3 0 0 0 18 0' },
 };
 // tiny icon spec: path strings, 'cx,cy,r' circles (c...), rects (r x,y,w,h), ellipses (e cx,cy,rx,ry)
@@ -1629,6 +1734,7 @@ function adminStat(k) {
   if (k === 'sectors') { const n = S.users.filter((u) => u.role !== 'admin' && u.sectors?.length).length; return `${plural((S.lists.sectors || []).length, 'sector')} · ${n} restricted`; }
   if (k === 'lists') return `${LIST_DEFS.length} lists`;
   if (k === 'finance') return `${fin().base} · ${plural(Object.keys(fin().rates).length, 'rate')} set`;
+  if (k === 'alerts') return `${S.alerts.enabled ? 'On' : 'Off'} · ${S.notify?.emailEnabled ? 'daily email on' : 'email off'}`;
   if (k === 'audit') return 'Admins only · purges are logged';
   return `${plural(S.leads.length, 'lead')} · ${plural(S.actions.length, 'action item')}`;
 }
@@ -1766,7 +1872,7 @@ function viewAdmin(el) {
     return;
   }
   const p = ADMIN_PAGES[sub];
-  const body = { users: usersPanel, permissions: () => accessPanels().perms, sectors: () => accessPanels().matrix2, lists: listsPanel, finance: financePanel, audit: purgePanel, data: dataPanel }[sub]();
+  const body = { users: usersPanel, permissions: () => accessPanels().perms, sectors: () => accessPanels().matrix2, lists: listsPanel, finance: financePanel, alerts: alertsPanel, audit: purgePanel, data: dataPanel }[sub]();
   el.innerHTML = `<a class="back-link" href="#/admin">&lsaquo; Back to Admin</a>${head(p.title, p.blurb)}<div class="admin-sub">${body}</div>`;
 }
 
@@ -2247,6 +2353,7 @@ document.addEventListener('click', async (e) => {
   if (d.dcur) { S.dash.cur = d.dcur; return render(); }
   if (d.dsel !== undefined) { S.dash.sel = d.dsel === '' || S.dash.sel === d.dsel ? null : d.dsel; return render(); }
   if (d.dmgr !== undefined) { S.filters = { q: '', stage: '', sector: '', country: '', manager: d.dmgr === 'Unassigned' ? '' : d.dmgr, platform: '' }; location.hash = '#/leads'; return; }
+  if (d.xexp !== undefined) { S.actExp.has(d.xexp) ? S.actExp.delete(d.xexp) : S.actExp.add(d.xexp); return render(); }
   if (d.aexp !== undefined) { S.auExp.has(d.aexp) ? S.auExp.delete(d.aexp) : S.auExp.add(d.aexp); return render(); }
   if (d.pgn) { const [k, v] = d.pgn.split(':'), G = pgState(k); G.page = v === 'prev' ? G.page - 1 : v === 'next' ? G.page + 1 : Number(v); render(); window.scrollTo(0, 0); return; }
   if (d.apg) { const G = S.apg; G.page = d.apg === 'prev' ? G.page - 1 : d.apg === 'next' ? G.page + 1 : Number(d.apg); render(); window.scrollTo(0, 0); return; }
@@ -2298,6 +2405,8 @@ document.addEventListener('click', async (e) => {
   if (d.act === 'clear-filters') { S.colf.leads = {}; closeColPop(); S.filters = { q: '', stage: '', sector: '', country: '', manager: '', platform: '' }; return render(); }
   if (d.act === 'import') return pickImport();
   if (d.act === 'save-fin') return saveFin();
+  if (d.act === 'save-alerts') return saveAlerts();
+  if (d.act === 'alerts-scope') { S.alertsMine = d.v === 'mine'; return render(); }
   if (d.act === 'sync-lists') return syncFromLeads();
   if (d.act === 'save-colour-labels') return saveColourLabels();
   if (d.act === 'clear-pipe-search') { S.pipeQ = ''; render(); $('#p-q')?.focus(); return; }

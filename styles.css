@@ -918,3 +918,21 @@ tbody tr.tagged:hover { background: color-mix(in srgb, var(--tag) 28%, var(--pan
 /* toasts shown inside an open dialog (the dialog covers the normal toast area) */
 .toasts-dock { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); display: flex; flex-direction: column; gap: 8px; align-items: center; z-index: 5; pointer-events: none; width: max-content; max-width: calc(100vw - 24px); }
 .toasts-dock .toast { pointer-events: auto; }
+
+/* Action items: fixed row height, long text is cut off and opened with "Show more" (same idea as the Audit Trail) */
+.act-fixed tbody tr:not(.x-open) { height: 66px; }
+.act-fixed .aclamp { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+.act-fixed tr.x-open .aclamp { display: block; -webkit-line-clamp: unset; overflow: visible; }
+.act-fixed tr.x-open td { vertical-align: top; }
+.act-fixed td.ax { text-align: right; }
+.act-fixed td.ax button { visibility: hidden; white-space: nowrap; }
+.act-fixed td.ax button.on { visibility: visible; }
+.act-fixed th.ax { width: 104px; }
+
+/* ---- Alerts page and menu count ---- */
+#nav .count.alert-count { background: #d64545; color: #fff; border-radius: 999px; padding: 0 7px; min-width: 20px; text-align: center; font-weight: 600; margin-left: 4px; }
+.alert-why { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; flex: none; }
+.alert-pill { font-size: var(--fs-xs); font-weight: 600; padding: 2px 8px; border-radius: 999px; background: var(--panel-2); color: var(--muted); white-space: nowrap; }
+.alert-pill.late { background: rgba(214, 69, 69, .14); color: #d64545; }
+.count-pill { font-size: var(--fs-sm); font-weight: 600; color: var(--muted); background: var(--panel-2); border-radius: 999px; padding: 2px 10px; align-self: flex-start; }
+textarea#al-extra { width: 100%; font: inherit; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--ink); resize: vertical; }
