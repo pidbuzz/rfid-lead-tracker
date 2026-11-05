@@ -1,7 +1,7 @@
 // Run with: npm test   (no network or Firebase needed)
 import assert from 'node:assert/strict';
 import nodemailer from 'nodemailer';
-import { mergeAlerts, dayGapBetween, dateInTz, lastActivityDate, flagLead } from '../alerts-core.js';
+import { mergeAlerts, dayGapBetween, dateInTz, lastActivityDate, flagLead, flagAction, actionLastActivity } from '../alerts-core.js';
 import { buildDigests } from './digest.mjs';
 
 const TODAY = '2026-11-05', TZ = 'Australia/Sydney';
@@ -63,6 +63,47 @@ assert.equal(buildDigests([L({ company: 'ok', timeline: [upd('2026-11-04T02:00:0
 // managers only (no everyone list)
 const only = buildDigests(leads, cfg, { managerEmails: { Ann: 'ann@x.com' } }, TODAY, { tz: TZ });
 assert.deepEqual(only.digests.map((d) => d.to), ['ann@x.com']);
+
+// ---- action items ----
+const A = (o) => ({ id: 'a' + (o.no || 1), no: '1', title: 'Do it', owner: 'Ann', status: 'Open', created: '2026-10-30', timeline: [], ...o });
+const af = (a, c = cfg) => flagAction(a, c, TODAY, TZ);
+// last activity: newest history entry, else last edit, else created date
+assert.equal(actionLastActivity(A({ timeline: [upd('2026-10-20T23:30:00Z')] }), TZ), '2026-10-21');
+assert.equal(actionLastActivity(A({ updatedAtIso: '2026-11-01T01:00:00Z' }), TZ), '2026-11-01');
+assert.equal(actionLastActivity(A({}), TZ), '2026-10-30');
+// stale (14 days), due (within 3 days or overdue), closed statuses skipped
+assert.equal(af(A({ created: '2026-10-22' }))?.stale, 14);
+assert.equal(af(A({ created: '2026-10-23' })), null);
+assert.equal(af(A({ created: '2026-11-04', dueDate: '2026-11-03' })).follow, -2);
+assert.equal(af(A({ created: '2026-11-04', dueDate: '2026-11-08' })).follow, 3);
+assert.equal(af(A({ created: '2026-11-04', dueDate: '2026-11-09' })), null);
+assert.equal(af(A({ created: '2026-11-04' })), null);                       // no due date and recently updated: fine
+assert.equal(af(A({ created: '2026-01-01', status: 'Closed' })), null);
+assert.equal(af(A({ created: '2026-01-01', status: 'Info Only' })), null);
+assert.equal(af(A({ created: '2026-01-01' }), mergeAlerts({ enabled: false })), null);
+// digests with action items
+const acts = [
+  A({ no: '1', title: 'Late <thing>', owner: 'Ann', dueDate: '2026-11-02', created: '2026-11-01' }),
+  A({ no: '2', title: 'Old one', owner: 'Cat', created: '2026-09-01' }),      // Cat has no email
+  A({ no: '3', title: 'Done', owner: 'Ann', status: 'Closed', created: '2026-01-01' }),
+  A({ no: '4', title: 'Fine', owner: 'Ann', created: '2026-11-04' }),
+];
+const both = buildDigests(leads, cfg, notify, TODAY, { tz: TZ, dateLabel: 'Thu 5 Nov', appUrl: 'https://a.b/app/', actions: acts });
+assert.equal(both.arows.length, 2);
+const annB = both.digests.find((d) => d.to === 'ann@x.com'), bossB = both.digests.find((d) => d.to === 'boss@x.com');
+assert.equal(annB.count, 3);                                                    // 2 leads + her 1 action item
+assert.ok(annB.subject.includes('2 leads and 1 action item need attention'));
+assert.ok(annB.html.includes('Late &lt;thing&gt;') && !annB.html.includes('<thing>') && !annB.html.includes('Old one'));
+assert.ok(annB.html.includes('overdue') && annB.text.includes('ACTION ITEMS') && annB.text.includes('#/actions'));
+assert.equal(bossB.count, 6);                                                   // everything, incl. Cat's item
+assert.ok(bossB.html.includes('Old one') && bossB.html.includes('No update for'));
+// actions only (no flagged leads)
+const onlyA = buildDigests([], cfg, notify, TODAY, { tz: TZ, actions: acts });
+assert.equal(onlyA.rows.length, 0); assert.ok(onlyA.digests.length > 0);
+assert.ok(onlyA.digests.find((d) => d.to === 'ann@x.com').subject.includes('1 action item needs attention'));
+// switched off
+assert.equal(buildDigests([], cfg, { ...notify, includeActions: false }, TODAY, { tz: TZ, actions: acts }).digests.length, 0);
+assert.equal(buildDigests(leads, cfg, { ...notify, includeActions: false }, TODAY, { tz: TZ, actions: acts }).arows.length, 0);
 
 // real message build through nodemailer (no sending)
 const tx = nodemailer.createTransport({ jsonTransport: true });

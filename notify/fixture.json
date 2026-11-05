@@ -1,0 +1,19 @@
+{
+  "alerts": { "staleDays": 14, "followDays": 3 },
+  "notify": {
+    "emailEnabled": true,
+    "managerEmails": { "Eric Tan": "eric@example.com", "Steve Andrinos": "steve@example.com" },
+    "extraRecipients": ["boss@example.com"]
+  },
+  "leads": [],
+  "actions": [
+    { "id": "1", "no": "7",  "title": "LiftTrak certification for Malaysia", "owner": "All",
+      "status": "Open", "created": "2025-12-08" },
+    { "id": "2", "no": "16", "title": "Partnership agreement. Paragon ID vs RFID Discovery.", "owner": "Steve Andrinos",
+      "status": "Open", "created": "2026-11-04" },
+    { "id": "3", "no": "17", "title": "HashMicro Partnership Agreement", "owner": "Eric Tan",
+      "status": "In Progress", "created": "2026-10-29", "dueDate": "2026-11-12" },
+    { "id": "4", "no": "18", "title": "Overdue example", "owner": "Eric Tan",
+      "status": "In Progress", "created": "2026-11-04", "dueDate": "2026-11-02" }
+  ]
+}
