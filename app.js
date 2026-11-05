@@ -319,7 +319,7 @@ const S = {
   alerts: mergeAlerts(), notify: null, alertsMine: true, notifyUnsub: null,
   user: null, profile: null, leads: [], actions: [], users: [], invites: [], invitesUnsub: null, perms: mergePerms(), permsLoaded: false, permDraft: null, secDraft: null, sig: '', rowUnsubs: [], leadParts: {}, lists: structuredClone(DEFAULT_LISTS),
   route: 'dashboard', openLead: null, openAction: null, unsubs: [], dataUnsubs: [], usersUnsub: null, listening: false, pendingName: '',
-  filters: { q: '', stage: '', sector: '', country: '', manager: '', platform: '' },
+  filters: { q: '', stage: '', sector: '', country: '', manager: '', platform: '', colour: '' },
   sort: { key: 'date', dir: 'desc' }, actFilter: 'active', actQ: '', pipeQ: '', hideEmpty: false, editList: null, draft: [],
   audit: [], auditUnsubs: [], auditParts: {}, auditLimit: 200, auditLoading: true, auditMore: false, auf: { q: '', entity: '', by: '', action: '', from: '', to: '' }, apg: { size: 25, page: 1, sig: '' }, pgr: {}, auExp: new Set(), actExp: new Set(), flash: null,
   pg: { rows: [], loaded: false, loading: false, busy: false, limit: 200, more: false, sel: new Set(), from: '', to: '' },
@@ -1307,7 +1307,7 @@ function filteredLeads(except) {
   const f = S.filters, q = f.q.trim().toLowerCase();
   let ls = S.leads.filter((l) => (!f.stage || l.stage === f.stage) && (!f.sector || l.sector === f.sector) && (!f.country || l.country === f.country)
     && (!f.manager || l.manager === f.manager) && (!f.platform || l.platform === f.platform)
-    && (!f.preset || PRESETS[f.preset]?.[1](l) !== false) && (!f.dealType || (f.dealType === '__none' ? !l.dealType : l.dealType === f.dealType))
+    && (!f.colour || (f.colour === '__none' ? !l.colour : l.colour === f.colour)) && (!f.preset || PRESETS[f.preset]?.[1](l) !== false) && (!f.dealType || (f.dealType === '__none' ? !l.dealType : l.dealType === f.dealType))
     && (!q || [l.company, l.overview, l.update, contactText(l), l.country, l.manager, l.website, l.hubspotId].join(' ').toLowerCase().includes(q)));
   ls = applyCol(ls, 'leads', except);
   const { dir } = S.sort, key = S.sort.key === 'valueAmount' && !canValue() ? 'date' : S.sort.key, m = dir === 'asc' ? 1 : -1;
@@ -1342,7 +1342,7 @@ function viewLeads(el) {
     <input type="search" id="f-q" placeholder="Search company, HubSpot ID, contact, notes…" aria-label="Search leads" value="${esc(f.q)}">
     ${sel('stage', 'All stages', stages())}${sel('sector', 'All sectors', uniq([...S.lists.sectors, ...S.leads.map((l) => l.sector)]))}
     ${sel('platform', 'All platforms', uniq([...S.lists.platforms, ...S.leads.map((l) => l.platform)]))}
-    ${sel('country', 'All countries', uniq([...S.lists.countries, ...S.leads.map((l) => l.country)]))}${sel('manager', 'All managers', uniq([...S.lists.managers, ...S.leads.map((l) => l.manager)]))}
+    ${sel('country', 'All countries', uniq([...S.lists.countries, ...S.leads.map((l) => l.country)]))}<select id="f-colour" aria-label="Colour tag"><option value="">All colour tags</option>${TAG_PAL.map(([k]) => `<option value="${k}" ${f.colour === k ? 'selected' : ''}>${esc(tagName(k))}</option>`).join('')}<option value="__none" ${f.colour === '__none' ? 'selected' : ''}>No colour tag</option></select>${sel('manager', 'All managers', uniq([...S.lists.managers, ...S.leads.map((l) => l.manager)]))}
     ${f.preset && PRESETS[f.preset] ? `<button type="button" class="ov-fchip" data-act="clear-preset" title="Remove this filter">${esc(PRESETS[f.preset][0])} ✕</button>` : ''}${f.dealType ? `<button type="button" class="ov-fchip" data-act="clear-deal" title="Remove this filter">Deal type: ${esc(f.dealType === '__none' ? 'Not set' : f.dealType)} ✕</button>` : ''}
     ${Object.values(f).some(Boolean) || colActive('leads') ? '<button class="btn ghost sm" data-act="clear-filters">Clear filters</button>' : ''}
   </div>
@@ -2542,7 +2542,7 @@ document.addEventListener('click', async (e) => {
   if (d.act === 'audit-clear') { S.colf.audit = {}; closeColPop(); S.auf = { q: '', entity: '', by: '', action: '', from: '', to: '' }; return render(); }
   if (d.act === 'clear-preset') { S.filters.preset = ''; return render(); }
   if (d.act === 'clear-deal') { S.filters.dealType = ''; return render(); }
-  if (d.act === 'clear-filters') { S.colf.leads = {}; closeColPop(); S.filters = { q: '', stage: '', sector: '', country: '', manager: '', platform: '' }; return render(); }
+  if (d.act === 'clear-filters') { S.colf.leads = {}; closeColPop(); S.filters = { q: '', stage: '', sector: '', country: '', manager: '', platform: '', colour: '' }; return render(); }
   if (d.act === 'import') return pickImport();
   if (d.act === 'save-fin') return saveFin();
   if (d.act === 'save-alerts') return saveAlerts();

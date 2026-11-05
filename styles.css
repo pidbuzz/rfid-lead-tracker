@@ -949,3 +949,11 @@ textarea#al-extra { width: 100%; font: inherit; padding: 8px 10px; border: 1px s
 .ct-lines { font-weight: 400; font-size: var(--fs-sm); margin-top: 2px; }
 .ct-notes { margin-top: 8px; font-weight: 400; }
 @media (max-width: 900px) { .ct-row { grid-template-columns: 1fr; } }
+
+/* v69: column-header filter buttons were pushed past the table edge (and clipped) when the table was a little too wide for its box.
+   Let headers wrap onto two lines and use tighter padding so the whole header, funnel included, always fits. */
+.table-wrap th { white-space: normal; padding-left: 10px; padding-right: 8px; vertical-align: bottom; }
+.table-wrap td { padding-left: 10px; padding-right: 10px; }
+.table-wrap .th-in { display: inline-flex; flex-wrap: nowrap; align-items: center; gap: 2px; max-width: 100%; }
+.table-wrap .th-in > button[data-sort] { text-align: left; line-height: 1.25; }
+.table-wrap .cf-btn { flex: none; width: 20px; height: 20px; }
