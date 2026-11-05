@@ -18,7 +18,7 @@ const IDLE_MINUTES = 60, IDLE_WARN_SECONDS = 60, IDLE_KEY = 'rfid-last-active';
 // Permission matrix: what each role may do. Admin always can do everything (locked).
 const PERM_GROUPS = [
   ['Leads', [['leads_view', 'View leads'], ['values_view', 'See $ values (lead values, pipeline totals, forecast)'], ['leads_create', 'Add leads'], ['leads_edit', 'Edit leads, post updates, change stage'], ['leads_delete', 'Delete leads']]],
-  ['Action items', [['actions_view', 'View action items'], ['actions_create', 'Add action items'], ['actions_edit', 'Edit action items and status'], ['actions_delete', 'Delete action items']]],
+  ['Action items', [['actions_view', 'View action items'], ['actions_create', 'Add action items'], ['actions_edit', 'Edit action items and status'], ['actions_delete', 'Delete action items (administrators only)']]],
   ['Audit trail', [['audit_view', 'View the audit trail']]],
 ];
 const ADMIN_ONLY_PERMS = ['Manage users, roles and sector access', 'Edit dropdown lists', 'Import data and download backups'];
@@ -71,7 +71,7 @@ const TENDER_STEPS = [
 const LEAD_FIELDS = [['company', 'Company'], ['stage', 'Stage'], ['date', 'Date logged'], ['sector', 'Sector'], ['platform', 'Platform'], ['country', 'Country'], ['manager', 'Account manager'],
   ['valueAmount', 'Est. value'], ['currency', 'Currency'], ['valueNotes', 'Value notes'], ['website', 'Website'], ['hubspotId', 'HubSpot Record ID'], ['nextFollowUp', 'Next follow-up'], ['expectedClose', 'Expected close'], ['probability', 'Probability %'], ['dealType', 'Deal type'], ['effort', 'Effort size'], ['lossReason', 'Loss reason'], ['colour', 'Colour tag'], ['contacts', 'Customer contacts'],
   ['overview', 'Project overview'], ['update', 'Latest update']];
-const ACTION_FIELDS = [['title', 'Action item'], ['owner', 'Owner'], ['status', 'Status'], ['created', 'Created'], ['dueDate', 'Due'], ['comments', 'Comments']];
+const ACTION_FIELDS = [['title', 'Action item'], ['owner', 'Owner'], ['status', 'Status'], ['created', 'Created'], ['dueDate', 'Due'], ['comments', 'Comments'], ['closedOn', 'Closed on']];
 const FL = Object.fromEntries([...LEAD_FIELDS, ...ACTION_FIELDS, ['role', 'Role'], ['name', 'Name'], ['sectors', 'Sector access'], ['email', 'Email']]);
 const LEAD_KEY = ['company', 'stage', 'sector', 'country', 'manager', 'valueAmount'];
 const AUDIT_ACTIONS = { create: 'Created', update: 'Edited', stage: 'Stage change', delete: 'Deleted', role: 'Access change', settings: 'Settings', import: 'Import', export: 'Export', purge: 'Purge', login: 'Signed in' };
@@ -309,7 +309,7 @@ const db = getFirestore(fbApp);
 const S = {
   alerts: mergeAlerts(), notify: null, alertsMine: true, notifyUnsub: null,
   user: null, profile: null, leads: [], actions: [], users: [], invites: [], invitesUnsub: null, perms: mergePerms(), permsLoaded: false, permDraft: null, secDraft: null, sig: '', rowUnsubs: [], leadParts: {}, lists: structuredClone(DEFAULT_LISTS),
-  route: 'dashboard', openLead: null, unsubs: [], dataUnsubs: [], usersUnsub: null, listening: false, pendingName: '',
+  route: 'dashboard', openLead: null, openAction: null, unsubs: [], dataUnsubs: [], usersUnsub: null, listening: false, pendingName: '',
   filters: { q: '', stage: '', sector: '', country: '', manager: '', platform: '' },
   sort: { key: 'date', dir: 'desc' }, actFilter: 'active', actQ: '', pipeQ: '', hideEmpty: false, editList: null, draft: [],
   audit: [], auditUnsubs: [], auditParts: {}, auditLimit: 200, auditLoading: true, auditMore: false, auf: { q: '', entity: '', by: '', action: '', from: '', to: '' }, apg: { size: 25, page: 1, sig: '' }, pgr: {}, auExp: new Set(), actExp: new Set(), flash: null,
@@ -501,7 +501,7 @@ function cleanup() {
   S.usersUnsub?.(); S.usersUnsub = null;
   S.invitesUnsub?.(); S.invitesUnsub = null; S.invites = [];
   S.notifyUnsub?.(); S.notifyUnsub = null; S.notify = null;
-  S.listening = false; S.profile = null; S.leads = []; S.actions = []; S.users = []; S.openLead = null; S.colorBy = null;
+  S.listening = false; S.profile = null; S.leads = []; S.actions = []; S.users = []; S.openLead = null; S.openAction = null; S.colorBy = null;
 }
 
 /* ---- Idle timeout ---- */
@@ -722,6 +722,7 @@ function render() {
   window.scrollTo(0, scroll);
   renderColPop();
   if (S.openLead) { const l = S.leads.find((x) => x.id === S.openLead); l ? renderDrawer(l) : closeDrawer(); }
+  else if (S.openAction) { const a = S.actions.find((x) => x.id === S.openAction); a ? renderActionDrawer(a) : closeDrawer(); }
 }
 
 /* =====================================================================
@@ -1354,7 +1355,7 @@ function actionRows(except) {
   const rows = S.actions.filter((a) => {
     const st = a.status || 'Open';
     const ok = S.actFilter === 'all' || (S.actFilter === 'active' ? !['Closed', 'Info Only'].includes(st) : st === S.actFilter);
-    return ok && (!S.actQ || [a.title, a.owner, a.comments].join(' ').toLowerCase().includes(S.actQ.toLowerCase()));
+    return ok && (!S.actQ || [a.title, a.owner, a.comments, ...(a.timeline || []).map((t) => t.text)].join(' ').toLowerCase().includes(S.actQ.toLowerCase()));
   });
   return applyCol(rows, 'actions', except);
 }
@@ -1367,13 +1368,13 @@ function viewActions(el) {
   <div class="toolbar"><input type="search" id="a-q" placeholder="Search action items…" aria-label="Search action items" value="${esc(S.actQ)}">
     <select id="a-filter" aria-label="Status filter">${filters.map(([v, l]) => `<option value="${esc(v)}" ${S.actFilter === v ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>${colActive('actions') ? '<button class="btn ghost sm" data-act="clear-colf-actions">Clear filters</button>' : ''}</div>
   ${P.html}
-  <div class="table-wrap"><table class="act-fixed"><thead><tr>${Object.entries(COLLABEL.actions).map(([k, l]) => `<th><span class="th-in"><span>${l}</span>${cfBtn('actions', k)}</span></th>`).join('')}<th class="ax"></th>${can('actions_edit') || can('actions_delete') ? '<th></th>' : ''}</tr></thead>
+  <div class="table-wrap"><table class="act-fixed"><thead><tr>${Object.entries(COLLABEL.actions).map(([k, l]) => `<th><span class="th-in"><span>${l}</span>${cfBtn('actions', k)}</span></th>`).join('')}<th class="ax"></th><th></th></tr></thead>
   <tbody>${rows.map((a) => `<tr class="${S.actExp.has(a.id) ? 'x-open' : ''}" style="cursor:default"><td class="num">${esc(a.no ?? '')}</td><td><div class="prose aclamp" style="max-width:420px">${esc(a.title)}</div></td><td>${esc(a.owner || '')}</td>
     <td>${can('actions_edit') ? `<select data-status="${a.id}" aria-label="Status for action ${esc(a.no)}">${S.lists.statuses.map((s) => `<option ${a.status === s ? 'selected' : ''}>${esc(s)}</option>`).join('')}</select>` : esc(a.status || '')}</td>
-    <td class="num">${fmtDate(a.created)}</td><td class="num">${a.dueDate && a.dueDate < today() && !['Closed', 'Info Only'].includes(a.status) ? `<span class="tag-warn">${fmtDate(a.dueDate)}</span>` : fmtDate(a.dueDate)}</td>
-    <td><div class="prose aclamp" style="max-width:360px">${esc(a.comments || '')}</div></td>
+    <td class="num">${fmtDate(a.created)}</td><td class="num">${a.dueDate && a.dueDate < today() && !['Closed', 'Info Only'].includes(a.status) ? `<span class="tag-warn">${fmtDate(a.dueDate)}</span>` : fmtDate(a.dueDate)}${a.closedOn ? `<div class="muted small">Closed ${esc(fmtDate(a.closedOn))}</div>` : ''}</td>
+    ${actCommentCell(a)}
     <td class="ax"><button class="btn ghost sm" data-xexp="${a.id}" aria-expanded="${S.actExp.has(a.id)}">${S.actExp.has(a.id) ? 'Show less' : 'Show more'}</button></td>
-    ${can('actions_edit') || can('actions_delete') ? `<td><div class="row" style="flex-wrap:nowrap">${can('actions_edit') ? `<button class="btn sm" data-edit-action="${a.id}">Edit</button>` : ''}${can('actions_delete') ? `<button class="btn sm danger" data-del-action="${a.id}">Delete</button>` : ''}</div></td>` : ''}</tr>`).join('') || `<tr><td colspan="9" class="empty">No action items match.</td></tr>`}</tbody></table></div>
+    <td><div class="row" style="flex-wrap:nowrap"><button class="btn sm" data-aopen="${a.id}">History</button>${can('actions_edit') ? `<button class="btn sm" data-edit-action="${a.id}">Edit</button>` : ''}${isAdmin() ? `<button class="btn sm danger" data-del-action="${a.id}">Delete</button>` : ''}</div></td></tr>`).join('') || `<tr><td colspan="9" class="empty">No action items match.</td></tr>`}</tbody></table></div>
   ${P.html}`;
   requestAnimationFrame(markActionOverflow);
 }
@@ -1429,7 +1430,7 @@ const splitEmails = (t) => [...new Set(String(t || '').split(/[\s,;]+/).map((x) 
 function alertsPanel() {
   const a = S.alerts, n = S.notify || {}, mgrs = S.lists.managers || [], em = n.managerEmails || {}, skip = new Set(a.skipStages);
   const lr = n.lastRun;
-  const lastRun = lr?.at ? `Last email run: ${esc(fmtDT(Date.parse(lr.at)))} · ${esc(lr.status || '')}${lr.emails != null ? ` · ${plural(lr.emails, 'email')} sent, ${plural(lr.flagged ?? 0, 'lead')} flagged` : ''}.` : 'The email job has not run yet.';
+  const lastRun = lr?.at ? `Last email run: ${esc(fmtDT(Date.parse(lr.at)))} · ${esc(lr.status || '')}${lr.emails != null ? ` · ${plural(lr.emails, 'email')} sent, ${plural(lr.flagged ?? 0, 'item')} flagged` : ''}.` : 'The email job has not run yet.';
   return `<section class="panel"><div class="panel-head"><div><h2>Alert rules</h2><p class="muted small">These rules drive the <a href="#/alerts">Alerts page</a>, the count in the menu, and the daily email.</p></div></div>
     <label class="check"><input type="checkbox" id="al-on" ${a.enabled ? 'checked' : ''}> Alerts are on</label>
     <div class="fin-grid" style="margin-top:14px">
@@ -1442,8 +1443,9 @@ function alertsPanel() {
     <p class="muted small" style="margin-top:6px">Lost and Completed are always skipped.</p></section>
   <section class="panel"><div class="panel-head"><div><h2>Daily email</h2><p class="muted small">Sent by a scheduled GitHub Actions job (see the README, “Email alerts”). People listed below get one digest a day; nothing is sent when there is nothing to report.</p></div></div>
     <label class="check"><input type="checkbox" id="al-email" ${n.emailEnabled ? 'checked' : ''}> Send the daily email</label><br>
-    <label class="check" style="margin-top:8px"><input type="checkbox" id="al-wk" ${n.weekdaysOnly !== false ? 'checked' : ''}> Weekdays only (Monday to Friday)</label>
-    <h3 style="margin:18px 0 4px">Account managers</h3><p class="muted small">Each manager gets a digest of their own leads. Leave blank to skip a manager.</p>
+    <label class="check" style="margin-top:8px"><input type="checkbox" id="al-wk" ${n.weekdaysOnly !== false ? 'checked' : ''}> Weekdays only (Monday to Friday)</label><br>
+    <label class="check" style="margin-top:8px"><input type="checkbox" id="al-act" ${n.includeActions !== false ? 'checked' : ''}> Include open action items (overdue or due soon, or with no update for the same number of days as leads)</label>
+    <h3 style="margin:18px 0 4px">Account managers</h3><p class="muted small">Each manager gets a digest of their own leads and of the action items where they are the owner (matched by name). Leave blank to skip a manager.</p>
     <div class="fin-grid">${mgrs.map((m) => `<label class="field"><span>${esc(m)}</span><input type="email" data-al-mgr="${esc(m)}" value="${esc(em[m] || '')}" placeholder="name@company.com"></label>`).join('') || '<p class="muted">Add account managers under Dropdown lists first.</p>'}</div>
     <h3 style="margin:18px 0 4px">Everyone-digest recipients</h3><p class="muted small">These people get one digest covering every flagged lead, grouped by manager. Separate addresses with commas or new lines.</p>
     <label class="field"><textarea id="al-extra" rows="3" placeholder="sales.lead@company.com">${esc((n.extraRecipients || []).join('\n'))}</textarea></label>
@@ -1463,7 +1465,7 @@ async function saveAlerts() {
   for (const i of $$('[data-al-mgr]')) { const v = i.value.trim().toLowerCase(); if (!v) continue; if (!EMAIL_RE.test(v)) return toast(`“${i.value.trim()}” isn’t a valid email address.`, true); managerEmails[i.dataset.alMgr] = v; }
   const extra = splitEmails($('#al-extra').value), bad = extra.find((x) => !EMAIL_RE.test(x));
   if (bad) return toast(`“${bad}” isn’t a valid email address.`, true);
-  const nn = { emailEnabled: $('#al-email').checked, weekdaysOnly: $('#al-wk').checked, managerEmails, extraRecipients: extra };
+  const nn = { emailEnabled: $('#al-email').checked, weekdaysOnly: $('#al-wk').checked, includeActions: $('#al-act').checked, managerEmails, extraRecipients: extra };
   const onoff = (v) => (v ? 'On' : 'Off');
   const lc = [];
   if (next.enabled !== a.enabled) lc.push({ f: 'Alerts', from: onoff(a.enabled), to: onoff(next.enabled) });
@@ -1471,6 +1473,7 @@ async function saveAlerts() {
   if (next.followDays !== a.followDays) lc.push({ f: 'Follow-up window (days)', from: a.followDays < 0 ? 'Off' : String(a.followDays), to: next.followDays < 0 ? 'Off' : String(next.followDays) });
   if ([...next.skipStages].sort().join('|') !== [...a.skipStages].sort().join('|')) lc.push({ f: 'Never alert for stages', from: a.skipStages.join(', ') || '(none)', to: next.skipStages.join(', ') || '(none)' });
   if (nn.emailEnabled !== !!n.emailEnabled) lc.push({ f: 'Daily email', from: onoff(!!n.emailEnabled), to: onoff(nn.emailEnabled) });
+  if (nn.includeActions !== (n.includeActions !== false)) lc.push({ f: 'Email includes action items', from: onoff(n.includeActions !== false), to: onoff(nn.includeActions) });
   if (nn.weekdaysOnly !== (n.weekdaysOnly !== false)) lc.push({ f: 'Email weekdays only', from: onoff(n.weekdaysOnly !== false), to: onoff(nn.weekdaysOnly) });
   if (JSON.stringify(managerEmails) !== JSON.stringify(n.managerEmails || {}) || extra.join('|') !== (n.extraRecipients || []).join('|')) lc.push({ f: 'Email recipients', from: '', to: 'changed (addresses not logged)' });
   if (!lc.length) return toast('No changes to save.');
@@ -1879,14 +1882,15 @@ function viewAdmin(el) {
 /* =====================================================================
    Drawer
    ===================================================================== */
-function closeDrawer() { S.openLead = null; $('#drawer').hidden = true; $('#scrim').hidden = true; }
+function closeDrawer() { S.openLead = null; S.openAction = null; $('#drawer').hidden = true; $('#scrim').hidden = true; }
 $('#scrim').addEventListener('click', closeDrawer);
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('#drawer').hidden && !$('#dlg').open && !$('#confirm').open) closeDrawer(); });
 
 function renderDrawer(l) {
   const dr = $('#drawer'), wasHidden = dr.hidden;
   const prevScroll = dr.scrollTop;
-  const draft = $('#noteText')?.value || '';
+  const draft = dr.dataset.kind === 'lead' ? $('#noteText')?.value || '' : '';
+  dr.dataset.kind = 'lead'; dr.dataset.id = l.id; dr.setAttribute('aria-label', 'Lead details');
   dr.hidden = false; $('#scrim').hidden = false;
   if (!wasHidden) dr.style.animation = 'none';
   const url = safeUrl(l.website);
@@ -2082,6 +2086,110 @@ function leadForm(l = null) {
   };
 }
 
+/* ---- Action item history: every change is kept as a dated entry, like a lead's History ---- */
+const ACT_DONE = ['Closed', 'Info Only'];
+// Items made before history existed: show their creation and old comment as the first entries (saved with the next change).
+const actBase = (a) => {
+  const created = a.created ? a.created + 'T00:00:00.000Z' : new Date().toISOString();
+  const cAt = a.updatedAt?.toMillis ? new Date(a.updatedAt.toMillis()).toISOString() : created;
+  return [{ at: created, by: 'Earlier record', type: 'created', text: 'Action item created' }, ...(a.comments ? [{ at: cAt, by: 'Earlier record', type: 'update', text: a.comments }] : [])];
+};
+const hasTl = (a) => Array.isArray(a.timeline) && a.timeline.length > 0;
+const actTimeline = (a) => (hasTl(a) ? a.timeline : actBase(a));
+const actTlWrite = (a, add) => (add.length ? { timeline: hasTl(a) ? arrayUnion(...add) : [...actBase(a), ...add] } : {});
+const actLatest = (a) => [...actTimeline(a)].reverse().find((t) => t.type === 'update') || null;
+const actClosedOn = (a, next) => (next.status === 'Closed' ? (a.status === 'Closed' && a.closedOn ? a.closedOn : today()) : '');
+function actCommentCell(a) {
+  const t = actLatest(a), txt = t ? t.text : a.comments || '';
+  return `<td><div class="prose aclamp" style="max-width:360px" ${t ? `title="${esc(fmtDate(t.at))} · ${esc(t.by || '')}"` : ''}>${esc(txt)}</div></td>`;
+}
+// The reason a note is required for this change, or ''.
+function actNeedsReason(a, next) {
+  if (next.status === 'Closed' && a.status !== 'Closed') return 'closing an item';
+  if (a.status === 'Closed' && next.status !== 'Closed') return 'reopening an item';
+  if (a.dueDate && next.dueDate !== (a.dueDate || '')) return 'moving the due date';
+  return '';
+}
+function actEntries(a, next, note) {
+  const add = [], n = (v) => v || 'none', dt = (v) => (v ? fmtDate(v) : 'none');
+  if (next.status !== (a.status || '')) add.push(entry('status', `Status: ${n(a.status)} → ${n(next.status)}${next.status === 'Closed' ? ` (closed ${fmtDate(today())})` : a.status === 'Closed' ? ' (reopened)' : ''}`));
+  if (next.dueDate !== (a.dueDate || '')) add.push(entry('due', `Due date: ${dt(a.dueDate)} → ${dt(next.dueDate)}`));
+  if (next.owner !== (a.owner || '')) add.push(entry('owner', `Owner: ${n(a.owner)} → ${n(next.owner)}`));
+  if (next.title !== (a.title || '')) add.push(entry('edit', `Reworded: “${clip(a.title, 120)}” → “${clip(next.title, 120)}”`));
+  if (next.created !== (a.created || '')) add.push(entry('edit', `Created date: ${dt(a.created)} → ${dt(next.created)}`));
+  if (note) add.push(entry('update', note));
+  return add;
+}
+function actChanges(a, next, note) {
+  return diffFields(a, { ...a, ...next, closedOn: actClosedOn(a, next), comments: note || a.comments || '' }, ACTION_FIELDS);
+}
+async function saveActionChange(a, next, note, okMsg) {
+  const ch = actChanges(a, next, note);
+  if (!ch.length) return true;
+  const patch = { ...next, closedOn: actClosedOn(a, next), ...(note ? { comments: note } : {}), ...actTlWrite(a, actEntries(a, next, note)), ...stamp() };
+  return run(() => commit([['update', doc(db, 'actions', a.id), patch]], [auditOp('action', a.id, `#${a.no} ${next.title}`, 'update', ch)]), okMsg);
+}
+const actSame = (a) => ({ title: a.title, owner: a.owner || '', status: a.status || '', dueDate: a.dueDate || '', created: a.created || '' });
+// Asks for a short note (required for some changes). Resolves to the note text, or null if cancelled.
+function noteBox(title, msg, { required = false, label = 'Note', okLabel = 'Save' } = {}) {
+  return new Promise((res) => {
+    cdlg.innerHTML = `<form method="dialog"><div class="dlg-head"><h2>${esc(title)}</h2></div><div class="dlg-body"><p style="white-space:pre-line">${esc(msg)}</p>
+      <label class="field full"><span>${esc(label)}${required ? ' *' : ' (optional)'}</span><textarea id="noteBoxText" rows="3"></textarea></label></div>
+      <div class="dlg-foot"><button class="btn" value="no" formnovalidate>Cancel</button><button class="btn primary" value="yes" id="noteBoxOk">${esc(okLabel)}</button></div></form>`;
+    const ta = cdlg.querySelector('#noteBoxText'), ok = cdlg.querySelector('#noteBoxOk');
+    const sync = () => { ok.disabled = required && !ta.value.trim(); };
+    ta.oninput = sync; sync();
+    cdlg.onclose = () => res(cdlg.returnValue === 'yes' ? ta.value.trim() : null);
+    cdlg.returnValue = ''; cdlg.showModal(); ta.focus();
+  });
+}
+// Status picked in the table: a note is required when closing or reopening. Returns false if cancelled or failed.
+async function changeActionStatus(a, to) {
+  const next = { ...actSame(a), status: to }, need = actNeedsReason(a, next);
+  const note = await noteBox('Change status', `Change the status of action item #${a.no} from ${a.status || 'none'} to ${to}?`, { required: !!need, label: need ? `Reason for ${need}` : 'Note', okLabel: 'Change status' });
+  if (note === null) return false;
+  return saveActionChange(a, next, note, 'Status updated');
+}
+async function postActionUpdate(a) {
+  if (!a) return;
+  const note = $('#aNote').value.trim(), next = { ...actSame(a), status: $('#aStatus').value, dueDate: $('#aDue').value };
+  const need = actNeedsReason(a, next);
+  if (need && !note) return toast(`Add a short note: a reason is required when ${need}.`, true);
+  const ch = actChanges(a, next, note);
+  if (!ch.length) return toast('Nothing to post yet. Write an update, or change the status or due date.', true);
+  if (!await confirmBox('Post update', `Post this update to action item #${a.no}?\n\n${chText(ch)}`, 'Post update')) return;
+  if (await saveActionChange(a, next, note, 'Update posted')) { const el = $('#aNote'); if (el) el.value = ''; }
+}
+function renderActionDrawer(a) {
+  const dr = $('#drawer'), wasHidden = dr.hidden, prevScroll = dr.scrollTop;
+  const same = dr.dataset.kind === 'action' && dr.dataset.id === a.id;
+  const keep = same ? { note: $('#aNote')?.value || '', status: $('#aStatus')?.value, due: $('#aDue')?.value } : {};
+  dr.dataset.kind = 'action'; dr.dataset.id = a.id; dr.setAttribute('aria-label', 'Action item details');
+  dr.hidden = false; $('#scrim').hidden = false;
+  if (!wasHidden) dr.style.animation = 'none';
+  const tl = [...actTimeline(a)].reverse(), done = ACT_DONE.includes(a.status), late = a.dueDate && a.dueDate < today() && !done;
+  const st = keep.status ?? (a.status || ''), due = keep.due ?? (a.dueDate || '');
+  dr.innerHTML = `<div class="drawer-head"><div class="top"><div><h2 style="font-size:var(--fs-xl)" class="prose">${esc(a.title)}</h2><div class="row" style="margin-top:6px"><span class="muted small">Action item #${esc(a.no ?? '')}</span>${late ? '<span class="tag-warn">Overdue</span>' : ''}</div></div>
+    <button class="btn ghost sm" data-close aria-label="Close details">Close</button></div>
+    ${can('actions_edit') || isAdmin() ? `<div class="row" style="margin-top:12px">${can('actions_edit') ? `<button class="btn sm" data-edit-action="${a.id}">Edit item</button>` : ''}${isAdmin() ? `<button class="btn sm danger" data-del-action="${a.id}">Delete</button>` : ''}</div>` : ''}</div>
+  <div class="drawer-body">
+    <dl class="kv" style="margin:0">
+      <div><dt>Owner</dt><dd>${esc(a.owner || '—')}</dd></div><div><dt>Status</dt><dd>${esc(a.status || '—')}</dd></div>
+      <div><dt>Created</dt><dd>${esc(fmtDate(a.created) || '—')}</dd></div><div><dt>Due</dt><dd>${a.dueDate ? (late ? `<span class="tag-warn">${esc(fmtDate(a.dueDate))}</span>` : esc(fmtDate(a.dueDate))) : '—'}</dd></div>
+      ${a.closedOn ? `<div><dt>Closed on</dt><dd>${esc(fmtDate(a.closedOn))}</dd></div>` : ''}
+    </dl>
+    ${can('actions_edit') ? `<div><h3 style="margin-bottom:8px">Post an update</h3>
+      <div class="row" style="margin-bottom:8px"><label class="field" style="flex:1"><span>Status</span><select id="aStatus">${opts(S.lists.statuses, st, false)}</select></label>
+      <label class="field"><span>Due</span><input type="date" id="aDue" value="${esc(due)}"></label></div>
+      <textarea id="aNote" placeholder="What happened? What’s next? (A short reason is required when closing, reopening or moving the due date.)" aria-label="Update text">${esc(keep.note || '')}</textarea>
+      <div class="row" style="margin-top:8px"><button class="btn primary" data-apost="${a.id}">Post update</button></div></div>` : ''}
+    <div><h3 style="margin-bottom:12px">History</h3>${tl.length ? `<ul class="timeline">${tl.map((t) => `<li class="${esc(t.type)}"><div class="when">${esc(fmtDate(t.at))} · ${esc(t.by || '')}</div><div class="prose">${esc(t.text)}</div></li>`).join('')}</ul>` : '<p class="muted">No history yet.</p>'}
+      ${hasTl(a) ? '' : '<p class="muted small" style="margin-top:10px">This item was made before history was kept. Its creation and earlier comment are shown above and will be saved with the next update.</p>'}</div>
+  </div>`;
+  dr.scrollTop = prevScroll;
+  if (wasHidden) { dr.style.animation = ''; dr.querySelector('[data-close]')?.focus(); }
+}
+
 function actionForm(a = null) {
   const v = a || { created: today(), status: 'Open' };
   dlg.innerHTML = `<form id="actForm" method="dialog"><div class="dlg-head"><h2>${a ? 'Edit action item' : 'Add action item'}</h2></div>
@@ -2091,27 +2199,33 @@ function actionForm(a = null) {
     <label class="field"><span>Status</span><select name="status">${opts(S.lists.statuses, v.status, false)}</select></label>
     <label class="field"><span>Created</span><input type="date" name="created" value="${esc(v.created || '')}"></label>
     <label class="field"><span>Due</span><input type="date" name="dueDate" value="${esc(v.dueDate || '')}"></label>
-    <label class="field full"><span>Comments</span><textarea name="comments">${esc(v.comments)}</textarea></label>
+    <label class="field full"><span>${a ? 'Note about this change' : 'First update (optional)'}</span><textarea name="note" placeholder="${a ? 'Required when closing, reopening or moving the due date' : ''}"></textarea></label>
+    ${a ? '<p class="muted small full">Changes to status, owner and due date are added to the item’s history automatically. To log progress, use Post update in the History panel.</p>' : ''}
   </div>
   <div class="dlg-foot"><button class="btn" type="button" data-cancel>Cancel</button><button class="btn primary" type="submit">${a ? 'Save changes' : 'Add action item'}</button></div></form>`;
   dlg.showModal();
   $('[data-cancel]', dlg).onclick = () => dlg.close();
   $('#actForm').onsubmit = async (e) => {
     e.preventDefault();
-    const f = Object.fromEntries(new FormData(e.target));
-    const data = { title: f.title.trim(), owner: f.owner.trim(), status: f.status, created: f.created, dueDate: f.dueDate, comments: f.comments.trim() };
-    if (!data.title) return toast('Describe the action item.', true);
-    const ach = a ? diffFields(a, data, ACTION_FIELDS) : [];
-    if (!await confirmBox(a ? 'Save action item' : 'Add action item', a ? `Save changes to action item #${a.no}?${ach.length ? '\n\n' + chText(ach) : ''}` : `Add this action item${data.owner ? ' for ' + data.owner : ''}?`, a ? 'Save changes' : 'Add')) return;
+    const f = Object.fromEntries(new FormData(e.target)), note = (f.note || '').trim();
+    const next = { title: f.title.trim(), owner: f.owner.trim(), status: f.status, created: f.created, dueDate: f.dueDate };
+    if (!next.title) return toast('Describe the action item.', true);
+    if (a) {
+      const need = actNeedsReason(a, next);
+      if (need && !note) return toast(`Add a note: a reason is required when ${need}.`, true);
+      const ach = actChanges(a, next, note);
+      if (!ach.length) return dlg.close();
+      if (!await confirmBox('Save action item', `Save changes to action item #${a.no}?\n\n${chText(ach)}`, 'Save changes')) return;
+      if (await saveActionChange(a, next, note, 'Action item saved')) dlg.close();
+      return;
+    }
+    if (!await confirmBox('Add action item', `Add this action item${next.owner ? ' for ' + next.owner : ''}?`, 'Add')) return;
     const ok = await run(async () => {
-      if (a) {
-        const ch = diffFields(a, data, ACTION_FIELDS);
-        await commit([['update', doc(db, 'actions', a.id), { ...data, ...stamp() }]], ch.length ? [auditOp('action', a.id, `#${a.no} ${data.title}`, 'update', ch)] : []);
-      } else {
-        const nums = S.actions.map((x) => parseInt(x.no, 10)).filter((n) => !isNaN(n)), no = String(Math.max(0, ...nums) + 1), ref = doc(collection(db, 'actions'));
-        await commit([['set', ref, { ...data, no, createdAt: serverTimestamp(), ...stamp() }]], [auditOp('action', ref.id, `#${no} ${data.title}`, 'create', setFields(data, ACTION_FIELDS))]);
-      }
-    }, a ? 'Action item saved' : 'Action item added');
+      const nums = S.actions.map((x) => parseInt(x.no, 10)).filter((n) => !isNaN(n)), no = String(Math.max(0, ...nums) + 1), ref = doc(collection(db, 'actions'));
+      const timeline = [entry('created', 'Action item created'), ...(note ? [entry('update', note)] : [])];
+      const data = { ...next, comments: note, closedOn: next.status === 'Closed' ? today() : '' };
+      await commit([['set', ref, { ...data, no, timeline, createdAt: serverTimestamp(), ...stamp() }]], [auditOp('action', ref.id, `#${no} ${next.title}`, 'create', setFields(data, ACTION_FIELDS))]);
+    }, 'Action item added');
     if (ok) dlg.close();
   };
 }
@@ -2358,7 +2472,9 @@ document.addEventListener('click', async (e) => {
   if (d.pgn) { const [k, v] = d.pgn.split(':'), G = pgState(k); G.page = v === 'prev' ? G.page - 1 : v === 'next' ? G.page + 1 : Number(v); render(); window.scrollTo(0, 0); return; }
   if (d.apg) { const G = S.apg; G.page = d.apg === 'prev' ? G.page - 1 : d.apg === 'next' ? G.page + 1 : Number(d.apg); render(); window.scrollTo(0, 0); return; }
   if (d.sort) { S.sort = { key: d.sort, dir: S.sort.key === d.sort && S.sort.dir === 'asc' ? 'desc' : 'asc' }; render(); return; }
-  if (d.open) { S.openLead = d.open; const l = S.leads.find((x) => x.id === d.open); if (l) renderDrawer(l); return; }
+  if (d.aopen) { S.openLead = null; S.openAction = d.aopen; const a = S.actions.find((x) => x.id === d.aopen); if (a) renderActionDrawer(a); return; }
+  if (d.apost) return postActionUpdate(S.actions.find((x) => x.id === d.apost));
+  if (d.open) { S.openAction = null; S.openLead = d.open; const l = S.leads.find((x) => x.id === d.open); if (l) renderDrawer(l); return; }
   if (t.hasAttribute('data-close')) return closeDrawer();
   if (d.act === 'new-lead') return leadForm();
   if (d.act === 'new-action') return actionForm();
@@ -2434,7 +2550,8 @@ document.addEventListener('click', async (e) => {
   if (d.editAction) return actionForm(S.actions.find((a) => a.id === d.editAction));
   if (d.delAction) {
     const a = S.actions.find((x) => x.id === d.delAction);
-    if (await confirmBox('Delete action item', `Delete action item ${a.no}? This can’t be undone.`)) await run(() => commit([['delete', doc(db, 'actions', a.id)]], [auditOp('action', a.id, `#${a.no} ${a.title}`, 'delete', goneFields(a, ACTION_FIELDS.slice(0, 4)))]), 'Action item deleted');
+    if (!isAdmin()) return toast('Only an administrator can delete action items.', true);
+    if (await confirmBox('Delete action item', `Delete action item ${a.no} and its whole history? This can’t be undone.`)) await run(() => commit([['delete', doc(db, 'actions', a.id)]], [auditOp('action', a.id, `#${a.no} ${a.title}`, 'delete', goneFields(a, ACTION_FIELDS.slice(0, 4)))]), 'Action item deleted');
     return;
   }
   if (d.delUser) {
@@ -2502,7 +2619,7 @@ document.addEventListener('change', async (e) => {
   if (id === 'apg-size') { S.apg.size = t.value === 'all' ? 0 : Number(t.value); S.apg.page = 1; render(); return; }
   if (id?.startsWith('au-') && id !== 'au-q') { S.auf[id.slice(3)] = t.value; render(); }
   if (id === 'hideEmpty') { S.hideEmpty = t.checked; render(); }
-  if (t.dataset.status) { const a = S.actions.find((x) => x.id === t.dataset.status); if (a && await confirmRevert(t, a.status, 'Change status', `Change the status of action item #${a.no} from ${a.status || 'none'} to ${t.value}?`, 'Change status')) await run(() => commit([['update', doc(db, 'actions', a.id), { status: t.value, ...stamp() }]], [auditOp('action', a.id, `#${a.no} ${a.title}`, 'update', [{ f: 'status', from: clip(a.status), to: t.value }])]), 'Status updated'); }
+  if (t.dataset.status) { const a = S.actions.find((x) => x.id === t.dataset.status); if (a && !await changeActionStatus(a, t.value)) t.value = a.status ?? ''; }
   if (t.dataset.role) { const u = S.users.find((x) => x.id === t.dataset.role); if (u && await confirmRevert(t, u.role, 'Change role', `Change the role of ${u.email} from ${u.role} to ${t.value}?`, 'Change role')) await run(() => commit([['update', doc(db, 'users', u.id), { role: t.value }]], [auditOp('user', u.id, u.email, 'role', [{ f: 'role', from: clip(u.role), to: t.value }])]), 'Role updated'); }
 });
 const uniq0 = (a) => [...new Set(a)];

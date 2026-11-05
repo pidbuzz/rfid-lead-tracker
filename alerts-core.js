@@ -59,6 +59,33 @@ export function flagLead(l, cfg, todayIso, tz) {
   return { stale, follow, lastUpdate: last, nextFollowUp: l.nextFollowUp || '' };
 }
 
+// ---- Action items ----
+// Action items in these statuses never raise alerts. They use the same two day settings as leads (staleDays, followDays; "follow" means the due date).
+export const ACTION_DONE = ['Closed', 'Info Only'];
+
+// The calendar date of an action item's latest update: its newest history entry, else its last edit, else the day it was created.
+export function actionLastActivity(a, tz) {
+  const t = (a.timeline || []).filter((e) => !e.migrated && e.at);
+  const raw = t.length ? t[t.length - 1].at : a.updatedAtIso || a.created || '';
+  if (!raw) return '';
+  if (raw.length === 10) return raw;
+  const ms = Date.parse(raw);
+  return isNaN(ms) ? '' : dateInTz(ms, tz);
+}
+
+// null when an action item needs no alert, otherwise { stale, follow, lastUpdate, dueDate } (same meaning as flagLead).
+export function flagAction(a, cfg, todayIso, tz) {
+  if (!cfg.enabled) return null;
+  if (ACTION_DONE.includes(a.status)) return null;
+  const last = actionLastActivity(a, tz);
+  const idle = last ? dayGapBetween(last, todayIso) : null;
+  const stale = cfg.staleDays > 0 && idle != null && idle >= cfg.staleDays ? idle : null;
+  const fd = a.dueDate ? dayGapBetween(todayIso, a.dueDate) : null;
+  const follow = cfg.followDays >= 0 && fd != null && fd <= cfg.followDays ? fd : null;
+  if (stale == null && follow == null) return null;
+  return { stale, follow, lastUpdate: last, dueDate: a.dueDate || '' };
+}
+
 export const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
 export const followText = (fd) => (fd < 0 ? `Follow-up overdue by ${plural(-fd, 'day')}` : fd === 0 ? 'Follow-up due today' : `Follow-up due in ${plural(fd, 'day')}`);
 export const staleText = (n) => (n === 0 ? 'Updated today' : `No update for ${plural(n, 'day')}`);

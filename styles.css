@@ -936,3 +936,6 @@ tbody tr.tagged:hover { background: color-mix(in srgb, var(--tag) 28%, var(--pan
 .alert-pill.late { background: rgba(214, 69, 69, .14); color: #d64545; }
 .count-pill { font-size: var(--fs-sm); font-weight: 600; color: var(--muted); background: var(--panel-2); border-radius: 999px; padding: 2px 10px; align-self: flex-start; }
 textarea#al-extra { width: 100%; font: inherit; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--ink); resize: vertical; }
+
+/* Action item history: status, due-date and owner changes get the same dot as a lead's stage changes */
+.timeline li.status::before, .timeline li.due::before, .timeline li.owner::before { border-color: var(--accent); background: var(--accent); }
