@@ -69,11 +69,17 @@ const TENDER_STEPS = [
    Audit trail: what is recorded
    ===================================================================== */
 const LEAD_FIELDS = [['company', 'Company'], ['stage', 'Stage'], ['date', 'Date logged'], ['sector', 'Sector'], ['platform', 'Platform'], ['country', 'Country'], ['manager', 'Account manager'],
-  ['valueAmount', 'Est. value'], ['currency', 'Currency'], ['valueNotes', 'Value notes'], ['website', 'Website'], ['hubspotId', 'HubSpot Record ID'], ['nextFollowUp', 'Next follow-up'], ['expectedClose', 'Expected close'], ['probability', 'Probability %'], ['dealType', 'Deal type'], ['effort', 'Effort size'], ['lossReason', 'Loss reason'], ['colour', 'Colour tag'], ['contacts', 'Customer contacts'],
+  ['valueAmount', 'Est. value'], ['currency', 'Currency'], ['valueNotes', 'Value notes'], ['website', 'Website'], ['hubspotId', 'HubSpot Record ID'], ['nextFollowUp', 'Next follow-up'], ['expectedClose', 'Expected close'], ['probability', 'Probability %'], ['dealType', 'Deal type'], ['effort', 'Effort size'], ['lossReason', 'Loss reason'], ['colour', 'Colour tag'], ['contactList', 'Contacts'], ['contacts', 'Contact notes'],
   ['overview', 'Project overview'], ['update', 'Latest update']];
 const ACTION_FIELDS = [['title', 'Action item'], ['owner', 'Owner'], ['status', 'Status'], ['created', 'Created'], ['dueDate', 'Due'], ['comments', 'Comments'], ['closedOn', 'Closed on']];
 const FL = Object.fromEntries([...LEAD_FIELDS, ...ACTION_FIELDS, ['role', 'Role'], ['name', 'Name'], ['sectors', 'Sector access'], ['email', 'Email']]);
 const LEAD_KEY = ['company', 'stage', 'sector', 'country', 'manager', 'valueAmount'];
+/* ---- Customer contacts: a lead holds a list of { name, title, email, phone } ---- */
+const cleanContacts = (list) => (Array.isArray(list) ? list : []).map((c) => ({ name: String(c?.name || '').trim(), title: String(c?.title || '').trim(), email: String(c?.email || '').trim(), phone: String(c?.phone || '').trim() })).filter((c) => c.name || c.title || c.email || c.phone);
+const contactStr = (list) => cleanContacts(list).map((c) => [c.name, c.title, c.email, c.phone].filter(Boolean).join(' / ')).join('; ');
+// For the audit trail: show the contact list as readable text instead of an object list.
+const leadView = (o) => (o ? { ...o, contactList: contactStr(o.contactList) } : o);
+const contactText = (l) => [contactStr(l.contactList), l.contacts].filter(Boolean).join(' ');
 const AUDIT_ACTIONS = { create: 'Created', update: 'Edited', stage: 'Stage change', delete: 'Deleted', role: 'Access change', settings: 'Settings', import: 'Import', export: 'Export', purge: 'Purge', login: 'Signed in' };
 const AUDIT_ENTITIES = { lead: 'Lead', action: 'Action item', user: 'User', invite: 'Invite', list: 'Dropdown list', permissions: 'Permissions', data: 'Data' };
 const ACT_CLS = { create: 'ok', delete: 'bad', stage: 'acc', update: 'acc', role: 'warn', settings: 'warn', import: 'warn', export: 'mute', purge: 'bad', login: 'mute' };
@@ -302,6 +308,9 @@ const { getFirestore, collection, query, where, doc, onSnapshot, addDoc, setDoc,
 const fbApp = initializeApp(firebaseConfig);
 const auth = getAuth(fbApp);
 const db = getFirestore(fbApp);
+// Local testing only: open http://127.0.0.1:8080/?emulator=1 to use the Firebase emulators on this PC instead of the real project (see README, "Testing on your own PC").
+const USE_EMULATOR = ['localhost', '127.0.0.1'].includes(location.hostname) && new URLSearchParams(location.search).has('emulator');
+if (USE_EMULATOR) { authMod.connectAuthEmulator(auth, 'http://127.0.0.1:9099', { disableWarnings: true }); fsMod.connectFirestoreEmulator(db, '127.0.0.1', 8085); }
 
 /* =====================================================================
    State
@@ -1144,7 +1153,7 @@ function viewPipeline(el) {
   if (!can('leads_view')) return void (el.innerHTML = noAccess('leads'));
   const prevLeft = $('.board', el)?.scrollLeft || 0;
   const pq = S.pipeQ.trim().toLowerCase();
-  const shown = pq ? S.leads.filter((l) => [l.company, l.overview, l.update, l.contacts, l.country, l.manager, l.website, l.hubspotId].join(' ').toLowerCase().includes(pq)) : S.leads;
+  const shown = pq ? S.leads.filter((l) => [l.company, l.overview, l.update, contactText(l), l.country, l.manager, l.website, l.hubspotId].join(' ').toLowerCase().includes(pq)) : S.leads;
   const stg = stages().filter((s) => !S.hideEmpty || shown.some((l) => l.stage === s));
   const cf = colorFn(), cmode = colorBy();
   el.innerHTML = `${head('Pipeline', can('leads_edit') ? 'Drag a card to another column to change its stage. Scroll sideways to see all stages.' : 'Leads grouped by stage. Scroll sideways to see all stages.',
@@ -1299,7 +1308,7 @@ function filteredLeads(except) {
   let ls = S.leads.filter((l) => (!f.stage || l.stage === f.stage) && (!f.sector || l.sector === f.sector) && (!f.country || l.country === f.country)
     && (!f.manager || l.manager === f.manager) && (!f.platform || l.platform === f.platform)
     && (!f.preset || PRESETS[f.preset]?.[1](l) !== false) && (!f.dealType || (f.dealType === '__none' ? !l.dealType : l.dealType === f.dealType))
-    && (!q || [l.company, l.overview, l.update, l.contacts, l.country, l.manager, l.website, l.hubspotId].join(' ').toLowerCase().includes(q)));
+    && (!q || [l.company, l.overview, l.update, contactText(l), l.country, l.manager, l.website, l.hubspotId].join(' ').toLowerCase().includes(q)));
   ls = applyCol(ls, 'leads', except);
   const { dir } = S.sort, key = S.sort.key === 'valueAmount' && !canValue() ? 'date' : S.sort.key, m = dir === 'asc' ? 1 : -1;
   ls.sort((a, b) => { const x = a[key] ?? '', y = b[key] ?? ''; return (typeof x === 'number' && typeof y === 'number' ? x - y : String(x).localeCompare(String(y), undefined, { numeric: true })) * m; });
@@ -1342,7 +1351,7 @@ function viewLeads(el) {
   <div class="table-wrap"><table><thead><tr>${cols().map(([k, l]) => `<th aria-sort="${S.sort.key === k ? (S.sort.dir === 'asc' ? 'ascending' : 'descending') : 'none'}"><span class="th-in"><button data-sort="${k}">${l}${S.sort.key === k ? (S.sort.dir === 'asc' ? ' ↑' : ' ↓') : ''}</button>${cfBtn('leads', k)}</span></th>`).join('')}</tr></thead>
   <tbody>${ls.map((l, i) => `<tr class="cb${tagStyle(l) ? ' tagged' : ''}" style="--c:${cf(l)[0]};${tagStyle(l)}" title="${esc(cf(l)[1])}" data-open="${l.id}" tabindex="0">
     <td class="num">${P.offset + i + 1}</td>
-    <td><div class="co">${esc(l.company)}</div>${l.contacts ? `<div class="sub">${esc(l.contacts.split('\n')[0])}</div>` : ''}</td>
+    <td><div class="co">${esc(l.company)}</div>${(() => { const c0 = cleanContacts(l.contactList)[0], sub = c0 ? [c0.name, c0.email].filter(Boolean).join(' · ') : (l.contacts || '').split('\n')[0]; return sub ? `<div class="sub">${esc(sub)}</div>` : ''; })()}</td>
     <td class="num">${esc(l.hubspotId || '')}</td>
     <td>${chip(l.stage)}</td><td>${esc(l.sector || '')}</td><td>${esc(l.platform || '')}</td><td>${esc(l.country || '')}</td><td>${esc(l.manager || '')}</td>
     ${canValue() ? `<td class="num val-cell">${leadValue(l)}</td>` : ''}
@@ -1886,6 +1895,14 @@ function closeDrawer() { S.openLead = null; S.openAction = null; $('#drawer').hi
 $('#scrim').addEventListener('click', closeDrawer);
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('#drawer').hidden && !$('#dlg').open && !$('#confirm').open) closeDrawer(); });
 
+const telHref = (p) => String(p).replace(/[^\d+]/g, '');
+function contactsHtml(l) {
+  const list = cleanContacts(l.contactList);
+  const cards = list.map((c) => `<div class="ct-card"><div class="ct-name"><b>${esc(c.name || c.email || c.phone)}</b>${c.title ? ` <span class="muted">· ${esc(c.title)}</span>` : ''}</div>
+    ${c.email || c.phone ? `<div class="ct-lines">${c.email ? (EMAIL_RE.test(c.email) ? `<a href="mailto:${esc(c.email)}">${esc(c.email)}</a>` : esc(c.email)) : ''}${c.email && c.phone ? ' · ' : ''}${c.phone ? (telHref(c.phone) ? `<a href="tel:${esc(telHref(c.phone))}">${esc(c.phone)}</a>` : esc(c.phone)) : ''}</div>` : ''}</div>`).join('');
+  const notes = l.contacts ? `<div class="prose ct-notes${list.length ? ' muted small' : ''}">${esc(l.contacts)}</div>` : '';
+  return cards || notes ? cards + notes : '—';
+}
 function renderDrawer(l) {
   const dr = $('#drawer'), wasHidden = dr.hidden;
   const prevScroll = dr.scrollTop;
@@ -1906,7 +1923,7 @@ function renderDrawer(l) {
       ${canValue() ? `<div><dt>Estimated value</dt><dd>${esc(moneyFull(l.valueAmount, l.currency || 'AUD') || '—')}${l.valueNotes ? `<div class="muted small prose">${esc(l.valueNotes)}</div>` : ''}</dd></div>` : ''}
       <div><dt>Website</dt><dd>${url ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(url.replace(/^https?:\/\//, '').replace(/\/$/, ''))}</a>` : '—'}</dd></div>
       <div><dt>HubSpot Record ID</dt><dd class="num">${esc(l.hubspotId || '—')}</dd></div>
-      <div class="full"><dt>Customer contacts</dt><dd class="prose">${esc(l.contacts || '—')}</dd></div>
+      <div class="full"><dt>Customer contacts</dt><dd>${contactsHtml(l)}</dd></div>
       <div class="full"><dt>Project overview</dt><dd class="prose" style="font-weight:400">${esc(l.overview || '—')}</dd></div>
     </dl>
     ${can('leads_edit') ? `<div><h3 style="margin-bottom:8px">Colour tag</h3>${swatchButtons(l)}</div>` : (l.colour ? `<div class="row small"><span class="muted">Colour tag</span>${tagDot(l)}${esc(tagName(l.colour))}</div>` : '')}
@@ -1977,12 +1994,12 @@ async function saveLead(data, existing) {
     const timeline = [entry('created', 'Lead created')];
     if (data.update) timeline.push(entry('update', data.update));
     const ref = doc(collection(db, 'leads'));
-    return run(() => commit([['set', ref, { ...data, no, timeline, createdAt: serverTimestamp(), ...stamp() }]], [auditOp('lead', ref.id, data.company, 'create', setFields(data, LEAD_FIELDS), { sector: data.sector || '' })]), 'Lead added');
+    return run(() => commit([['set', ref, { ...data, no, timeline, createdAt: serverTimestamp(), ...stamp() }]], [auditOp('lead', ref.id, data.company, 'create', setFields(leadView(data), LEAD_FIELDS), { sector: data.sector || '' })]), 'Lead added');
   }
   const add = [];
   if (data.stage !== existing.stage) add.push(entry('stage', `Stage: ${existing.stage || 'none'} → ${data.stage || 'none'}`));
   if (data.update && data.update !== existing.update) add.push(entry('update', data.update));
-  const changes = diffFields(existing, data, LEAD_FIELDS);
+  const changes = diffFields(leadView(existing), leadView(data), LEAD_FIELDS);
   const action = changes.length === 1 && changes[0].f === 'stage' ? 'stage' : 'update';
   return run(() => commit([['update', doc(db, 'leads', existing.id), { ...data, ...(add.length ? { timeline: arrayUnion(...add) } : {}), ...stamp() }]],
     changes.length ? [auditOp('lead', existing.id, data.company, action, changes, { sector: data.sector || '' })] : []), 'Lead saved');
@@ -2038,6 +2055,9 @@ function confirmBox(title, msg, okLabel = 'Delete', danger = /delet|remov|disabl
 }
 const opts = (list, cur, blank = true, addNew = false) => `${blank ? '<option value="">—</option>' : ''}${[...new Set([...list, ...(cur && !list.includes(cur) ? [cur] : [])])].map((o) => `<option ${o === cur ? 'selected' : ''}>${esc(o)}</option>`).join('')}${addNew && isAdmin() ? '<option value="__new__">+ Add new…</option>' : ''}`;
 
+const contactRow = (c = {}) => `<div class="ct-row"><input type="text" class="ct-in-name" placeholder="Name" aria-label="Contact name" value="${esc(c.name)}"><input type="text" class="ct-in-title" placeholder="Job title" aria-label="Job title" value="${esc(c.title)}">
+  <input type="email" class="ct-in-email" placeholder="Email" aria-label="Contact email" value="${esc(c.email)}"><input type="tel" class="ct-in-phone" placeholder="Telephone" aria-label="Contact telephone" value="${esc(c.phone)}">
+  <button type="button" class="btn ghost sm ct-del" aria-label="Remove this contact">Remove</button></div>`;
 function leadForm(l = null) {
   const v = l || { date: today(), currency: S.lists.currencies[0] || 'AUD', stage: stages()[0] };
   dlg.innerHTML = `<form id="leadForm" method="dialog"><div class="dlg-head"><h2>${l ? 'Edit lead' : 'Add lead'}</h2></div>
@@ -2061,26 +2081,30 @@ function leadForm(l = null) {
     <label class="field"><span>Effort size (S, M, L)</span><select name="effort">${opts(EFFORTS, v.effort, true, false)}</select></label>
     <label class="field full"><span>Loss reason (required when the stage is Lost)</span><input type="text" name="lossReason" value="${esc(v.lossReason)}"></label>
     ${swatchField(v.colour)}
-    <label class="field full"><span>Customer contacts (one per line)</span><textarea name="contacts" style="min-height:56px">${esc(v.contacts)}</textarea></label>
+    <div class="full"><span class="ct-h">Customer contacts</span><div id="ctList">${(cleanContacts(v.contactList).length ? cleanContacts(v.contactList) : [{}]).map(contactRow).join('')}</div>
+      <button type="button" class="btn sm" id="ctAdd">+ Add contact</button></div>
+    <label class="field full"><span>Contact notes (anything that doesn’t fit above)</span><textarea name="contacts" style="min-height:56px">${esc(v.contacts)}</textarea></label>
     <label class="field full"><span>Project overview</span><textarea name="overview">${esc(v.overview)}</textarea></label>
     <label class="field full"><span>Latest update / action</span><textarea name="update">${esc(v.update)}</textarea></label>
   </div>
   <div class="dlg-foot"><button class="btn" type="button" data-cancel>Cancel</button><button class="btn primary" type="submit">${l ? 'Save changes' : 'Add lead'}</button></div></form>`;
   dlg.showModal();
   $('[data-cancel]', dlg).onclick = () => dlg.close();
+  $('#ctAdd').onclick = () => { $('#ctList').insertAdjacentHTML('beforeend', contactRow()); $('#ctList').lastElementChild.querySelector('input').focus(); };
+  $('#ctList').onclick = (e) => { const b = e.target.closest('.ct-del'); if (!b) return; b.closest('.ct-row').remove(); if (!$('#ctList').children.length) $('#ctList').insertAdjacentHTML('beforeend', contactRow()); };
   $('#leadForm').onsubmit = async (e) => {
     e.preventDefault();
     const f = Object.fromEntries(new FormData(e.target));
     const data = {
       company: f.company.trim(), stage: f.stage, date: f.date, sector: f.sector, platform: f.platform, country: f.country.trim(), manager: f.manager.trim(),
       ...(canValue() ? { valueAmount: f.valueAmount === '' ? null : Number(f.valueAmount), currency: f.currency, valueNotes: f.valueNotes.trim() } : {}), website: f.website.trim(), hubspotId: (f.hubspotId || '').trim(),
-      nextFollowUp: f.nextFollowUp, expectedClose: f.expectedClose || '', probability: f.probability === '' ? null : Math.min(100, Math.max(0, Math.round(Number(f.probability)))), dealType: f.dealType || '', effort: f.effort || '', lossReason: (f.lossReason || '').trim(), colour: f.colour || '', contacts: f.contacts.trim(), overview: f.overview.trim(), update: f.update.trim(),
+      nextFollowUp: f.nextFollowUp, expectedClose: f.expectedClose || '', probability: f.probability === '' ? null : Math.min(100, Math.max(0, Math.round(Number(f.probability)))), dealType: f.dealType || '', effort: f.effort || '', lossReason: (f.lossReason || '').trim(), colour: f.colour || '', contactList: cleanContacts($$('#ctList .ct-row', dlg).map((r) => ({ name: $('.ct-in-name', r).value, title: $('.ct-in-title', r).value, email: $('.ct-in-email', r).value, phone: $('.ct-in-phone', r).value }))), contacts: f.contacts.trim(), overview: f.overview.trim(), update: f.update.trim(),
     };
     if (!data.company) return toast('Enter the company name.', true);
     if (LOST_STAGES.includes(data.stage) && !data.lossReason) { toast('Add a loss reason for a lost / disqualified lead.', true); $('[name="lossReason"]', dlg)?.focus(); return; }
     if (data.hubspotId && S.leads.some((x) => x.id !== l?.id && (x.hubspotId || '') === data.hubspotId)
       && !await confirmBox('Duplicate HubSpot ID', `Another lead already uses HubSpot Record ID ${data.hubspotId}. Save anyway?`, 'Save anyway')) return;
-    const ch = l ? diffFields(l, data, LEAD_FIELDS) : [];
+    const ch = l ? diffFields(leadView(l), leadView(data), LEAD_FIELDS) : [];
     if (!await confirmBox(l ? 'Save changes' : 'Add lead', l ? `Save changes to “${data.company}”?${ch.length ? '\n\n' + chText(ch) : ''}` : `Add “${data.company}” as a new lead${data.stage ? ' at ' + data.stage : ''}?`, l ? 'Save changes' : 'Add lead')) return;
     if (await saveLead(data, l)) dlg.close();
   };
@@ -2374,7 +2398,7 @@ function download(name, text, type) {
 }
 function exportCsv() {
   const colsAll = [['no', 'No.'], ['date', 'Date'], ['company', 'Customer Company Name'], ['hubspotId', 'HubSpot Record ID'], ['update', 'Latest update'], ['website', 'Website'], ['valueAmount', 'Est. value'], ['currency', 'Currency'], ['valueNotes', 'Value notes'],
-    ['overview', 'Project overview'], ['sector', 'RFID sector'], ['platform', 'Platform'], ['stage', 'Stage'], ['country', 'Country'], ['manager', 'Account manager'], ['contacts', 'Customer details'], ['nextFollowUp', 'Next follow-up'],
+    ['overview', 'Project overview'], ['sector', 'RFID sector'], ['platform', 'Platform'], ['stage', 'Stage'], ['country', 'Country'], ['manager', 'Account manager'], ['contactList', 'Contacts (name / title / email / phone)', (l) => contactStr(l.contactList)], ['contacts', 'Contact notes'], ['nextFollowUp', 'Next follow-up'],
     ['expectedClose', 'Expected close'], ['dealType', 'Deal type'], ['probabilityOverride', 'Probability % (override)', (l) => l.probability ?? ''], ['probabilityUsed', 'Probability % (used)', (l) => probOf(l)],
     ['valueBase', `Est. value (${fin().base})`, (l) => { const v = valBase(l); return v == null ? 'No rate' : Math.round(v); }], ['effort', 'Effort size'], ['lossReason', 'Loss reason'], ['colour', 'Colour tag', (l) => (l.colour ? tagName(l.colour) : '')]];
   const cols = colsAll.filter(([k]) => canValue() || !['valueAmount', 'currency', 'valueNotes', 'valueBase'].includes(k));

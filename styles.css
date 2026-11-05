@@ -939,3 +939,13 @@ textarea#al-extra { width: 100%; font: inherit; padding: 8px 10px; border: 1px s
 
 /* Action item history: status, due-date and owner changes get the same dot as a lead's stage changes */
 .timeline li.status::before, .timeline li.due::before, .timeline li.owner::before { border-color: var(--accent); background: var(--accent); }
+
+/* Customer contacts on a lead */
+.ct-h { display: block; font-size: var(--fs-sm); font-weight: 500; color: var(--muted); margin-bottom: 6px; }
+.ct-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 10px; margin-bottom: 8px; border: 1px solid var(--line); border-radius: 10px; }
+.ct-row .ct-del { grid-column: 1 / -1; justify-self: end; }
+.ct-card { padding: 8px 0; border-top: 1px solid var(--line); }
+.ct-card:first-child { border-top: 0; padding-top: 0; }
+.ct-lines { font-weight: 400; font-size: var(--fs-sm); margin-top: 2px; }
+.ct-notes { margin-top: 8px; font-weight: 400; }
+@media (max-width: 900px) { .ct-row { grid-template-columns: 1fr; } }
